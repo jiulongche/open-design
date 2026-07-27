@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { homedir } from "node:os";
+import {
+  isAbsolute,
+  join,
+  posix,
+  relative,
+  resolve,
+  sep,
+  win32,
+} from "node:path";
 
 import {
   isReleaseChannel,
@@ -27,6 +36,36 @@ export type DistributionIdentityV1 = {
   shellDigest: string;
   shellType: DistributionShellType;
   shellVersion: string;
+};
+
+export const DISTRIBUTION_SUITE_PATH_ERROR_CODES = Object.freeze({
+  DATA_ROOT_NAMESPACE_MISMATCH: "DATA_ROOT_NAMESPACE_MISMATCH",
+  DATA_ROOT_NOT_ABSOLUTE: "DATA_ROOT_NOT_ABSOLUTE",
+} as const);
+
+export type DistributionSuitePathErrorCode =
+  (typeof DISTRIBUTION_SUITE_PATH_ERROR_CODES)[keyof typeof DISTRIBUTION_SUITE_PATH_ERROR_CODES];
+
+export type DistributionSuitePathRequest = {
+  channel: unknown;
+  dataDir?: string | null;
+  homeDir?: string;
+  namespace: unknown;
+  namespaceBaseRoot: string;
+  platform?: NodeJS.Platform;
+};
+
+export type DistributionSuitePaths = {
+  cacheRoot: string;
+  channel: ReleaseChannel;
+  channelRoot: string;
+  dataRoot: string;
+  logsRoot: string;
+  namespace: string;
+  namespaceBaseRoot: string;
+  namespaceRoot: string;
+  runtimeRoot: string;
+  updatesRoot: string;
 };
 
 export type DistributionArtifactInventoryV1 = {
@@ -64,6 +103,28 @@ export class DistributionProtocolError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DistributionProtocolError";
+  }
+}
+
+export class DistributionSuitePathError extends DistributionProtocolError {
+  readonly activeNamespace?: string;
+  readonly code: DistributionSuitePathErrorCode;
+  readonly configuredNamespace?: string;
+  readonly configuredValue: string;
+
+  constructor(options: {
+    activeNamespace?: string;
+    code: DistributionSuitePathErrorCode;
+    configuredNamespace?: string;
+    configuredValue: string;
+    message: string;
+  }) {
+    super(options.message);
+    this.name = "DistributionSuitePathError";
+    this.activeNamespace = options.activeNamespace;
+    this.code = options.code;
+    this.configuredNamespace = options.configuredNamespace;
+    this.configuredValue = options.configuredValue;
   }
 }
 
@@ -127,6 +188,97 @@ export function normalizeDistributionNamespace(value: unknown): string {
       error instanceof Error ? error.message : String(error),
     );
   }
+}
+
+const HOME_BARE_TOKENS = new Set(["~", "$HOME", "${HOME}"]);
+const HOME_PREFIX_RE = /^(~|\$\{HOME\}|\$HOME)[/\\](.*)$/;
+
+function expandDistributionHomePrefix(raw: string, home: string): string {
+  if (HOME_BARE_TOKENS.has(raw)) return home;
+  const match = HOME_PREFIX_RE.exec(raw);
+  if (match) return join(home, match[2] ?? "");
+  return raw;
+}
+
+function scopedDistributionDataRootNamespace(raw: string): string | null {
+  const parts = raw.replace(/[\\/]+$/g, "").split(/[\\/]+/);
+  const last = parts.length - 1;
+  if (last < 2) return null;
+  if (parts[last - 2] !== "namespaces" || parts[last] !== "data") return null;
+  return parts[last - 1] ?? null;
+}
+
+function normalizeDistributionNamespaceBaseRoot(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new DistributionProtocolError(
+      "distribution namespace base root must be a non-empty string",
+    );
+  }
+  if (value.includes("\0")) {
+    throw new DistributionProtocolError(
+      "distribution namespace base root must not contain null bytes",
+    );
+  }
+  return value;
+}
+
+export function resolveDistributionSuitePaths(
+  request: DistributionSuitePathRequest,
+): DistributionSuitePaths {
+  const channel = normalizeDistributionChannel(request.channel);
+  const namespace = normalizeDistributionNamespace(request.namespace);
+  const namespaceBaseRoot = normalizeDistributionNamespaceBaseRoot(
+    request.namespaceBaseRoot,
+  );
+  const channelRoot = join(namespaceBaseRoot, "..");
+  const namespaceRoot = join(namespaceBaseRoot, namespace);
+  const configuredDataDir = request.dataDir?.trim();
+  let dataRoot = join(namespaceRoot, "data");
+
+  if (configuredDataDir != null && configuredDataDir.length > 0) {
+    const expanded = expandDistributionHomePrefix(
+      configuredDataDir,
+      request.homeDir ?? homedir(),
+    );
+    const platform = request.platform ?? process.platform;
+    const absolute = platform === "win32"
+      ? win32.isAbsolute(expanded)
+      : posix.isAbsolute(expanded);
+    if (!absolute) {
+      throw new DistributionSuitePathError({
+        code: DISTRIBUTION_SUITE_PATH_ERROR_CODES.DATA_ROOT_NOT_ABSOLUTE,
+        configuredValue: configuredDataDir,
+        message: `distribution data root must be absolute: ${configuredDataDir}`,
+      });
+    }
+    const configuredNamespace = scopedDistributionDataRootNamespace(expanded);
+    if (configuredNamespace != null && configuredNamespace !== namespace) {
+      throw new DistributionSuitePathError({
+        activeNamespace: namespace,
+        code: DISTRIBUTION_SUITE_PATH_ERROR_CODES.DATA_ROOT_NAMESPACE_MISMATCH,
+        configuredNamespace,
+        configuredValue: configuredDataDir,
+        message:
+          `distribution data root namespace ${configuredNamespace} does not match ${namespace}`,
+      });
+    }
+    dataRoot = configuredNamespace == null
+      ? join(expanded, "namespaces", namespace, "data")
+      : expanded;
+  }
+
+  return {
+    cacheRoot: join(namespaceRoot, "cache"),
+    channel,
+    channelRoot,
+    dataRoot,
+    logsRoot: join(namespaceRoot, "logs"),
+    namespace,
+    namespaceBaseRoot,
+    namespaceRoot,
+    runtimeRoot: join(namespaceRoot, "runtime"),
+    updatesRoot: join(namespaceRoot, "updates"),
+  };
 }
 
 export function normalizeDistributionVersion(value: unknown, label = "version"): string {

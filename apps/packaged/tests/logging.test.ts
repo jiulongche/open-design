@@ -56,6 +56,8 @@ afterEach(() => {
 function makePaths(root: string, desktopLogPath = join(root, 'logs', 'desktop', 'latest.log')): PackagedNamespacePaths {
   return {
     cacheRoot: join(root, 'cache'),
+    channel: 'stable',
+    channelRoot: join(root, '..', '..'),
     desktopIdentityPath: join(root, 'runtime', 'desktop-root.json'),
     desktopLogPath,
     dataRoot: join(root, 'data'),
@@ -66,6 +68,8 @@ function makePaths(root: string, desktopLogPath = join(root, 'logs', 'desktop', 
     installationRoot: root,
     installerObservationRoot: join(root, 'data', 'observations', 'installer'),
     logsRoot: join(root, 'logs'),
+    namespace: 'default',
+    namespaceBaseRoot: join(root, '..'),
     namespaceRoot: root,
     resourceRoot: join(root, 'resources'),
     runtimeRoot: join(root, 'runtime'),

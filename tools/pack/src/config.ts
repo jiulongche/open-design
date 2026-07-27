@@ -3,12 +3,18 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+import { resolveDistributionSuitePaths } from "@open-design/distribution-proto";
 import {
   OPEN_DESIGN_SIDECAR_CONTRACT,
   SIDECAR_DEFAULTS,
 } from "@open-design/sidecar-proto";
 import { resolveNamespace } from "@open-design/sidecar";
-import { releaseChannelFromVersion, releaseNamespace } from "@open-design/release";
+import {
+  releaseChannelFromNamespace,
+  releaseChannelFromVersion,
+  releaseNamespace,
+  type ReleaseChannel,
+} from "@open-design/release";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -172,6 +178,14 @@ function defaultNamespaceForAppVersion(platform: ToolPackPlatform, appVersion: s
   if (channel == null) return SIDECAR_DEFAULTS.namespace;
 
   return releaseNamespace(channel, platform);
+}
+
+export function resolveToolPackDistributionChannel(
+  config: Pick<ToolPackConfig, "appVersion" | "namespace">,
+): ReleaseChannel {
+  return releaseChannelFromVersion(config.appVersion)
+    ?? releaseChannelFromNamespace(config.namespace, SIDECAR_DEFAULTS.namespace)
+    ?? "stable";
 }
 
 function resolveToolPackWebOutputMode(platform: ToolPackPlatform, value: string | undefined): ToolPackWebOutputMode {
@@ -357,6 +371,11 @@ export function resolveToolPackConfig(
   const outputPlatformRoot = join(outputRoot, platform);
   const outputNamespaceRoot = join(outputPlatformRoot, "namespaces", namespace);
   const runtimeNamespaceBaseRoot = join(toolPackRoot, "runtime", platform, "namespaces");
+  const runtimeSuitePaths = resolveDistributionSuitePaths({
+    channel: resolveToolPackDistributionChannel({ appVersion, namespace }),
+    namespace,
+    namespaceBaseRoot: runtimeNamespaceBaseRoot,
+  });
 
   return {
     appVersion,
@@ -377,8 +396,8 @@ export function resolveToolPackConfig(
         root: outputRoot,
       },
       runtime: {
-        namespaceBaseRoot: runtimeNamespaceBaseRoot,
-        namespaceRoot: join(runtimeNamespaceBaseRoot, namespace),
+        namespaceBaseRoot: runtimeSuitePaths.namespaceBaseRoot,
+        namespaceRoot: runtimeSuitePaths.namespaceRoot,
       },
       cacheRoot,
       toolPackRoot,

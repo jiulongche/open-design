@@ -22,7 +22,6 @@ import {
   type LauncherAttemptDescriptor,
   type LauncherTargetSelection,
 } from "@open-design/launcher-proto";
-import { releaseChannelFromNamespace, releaseChannelFromVersion } from "@open-design/release";
 
 import type { PackagedConfig, PackagedWebOutputMode, RawPackagedConfig } from "./config.js";
 import type { PackagedNamespacePaths } from "./paths.js";
@@ -103,12 +102,6 @@ async function pathExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-function inferLauncherChannel(config: Pick<PackagedConfig, "appVersion" | "namespace">): LauncherChannel {
-  return releaseChannelFromVersion(config.appVersion)
-    ?? releaseChannelFromNamespace(config.namespace, "default")
-    ?? "stable";
 }
 
 function parsePayloadManifest(raw: unknown, expected: {
@@ -445,7 +438,7 @@ export async function resolvePackagedLauncherRuntime(
   paths: PackagedNamespacePaths,
   options: ResolvePackagedLauncherRuntimeOptions = {},
 ): Promise<PackagedLauncherRuntime> {
-  const channel = inferLauncherChannel(config);
+  const channel = paths.channel;
   const launcherPaths = resolveLauncherPaths({
     channel,
     namespace: config.namespace,

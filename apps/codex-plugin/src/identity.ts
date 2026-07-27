@@ -9,6 +9,8 @@ import {
   type DistributionServeReportV1,
 } from "@open-design/distribution-proto";
 
+import type { CodexPluginSuiteObservation } from "./suite.js";
+
 export const IDENTITY_FILE_ARG = "--identity-file";
 export const FIXTURE_REPORT_URL_ARG = "--fixture-report-url";
 export const FIXTURE_REPORT_URL_ENV = "OD_CODEX_PLUGIN_FIXTURE_REPORT_URL";
@@ -34,6 +36,7 @@ type FixtureObservation =
 export type CodexPluginStatus = {
   fixture: FixtureObservation;
   identity: DistributionIdentityV1;
+  suite: CodexPluginSuiteObservation;
 };
 
 function valueAfterArg(args: readonly string[], name: string): string | null {
@@ -111,6 +114,7 @@ export async function readCodexPluginStatus(options: {
   fetchImpl?: typeof fetch;
   fixtureReportUrl: string | null;
   identity: DistributionIdentityV1;
+  suite: CodexPluginSuiteObservation;
 }): Promise<CodexPluginStatus> {
   return {
     fixture: await observeFixture(
@@ -119,5 +123,6 @@ export async function readCodexPluginStatus(options: {
       options.fetchImpl,
     ),
     identity: options.identity,
+    suite: options.suite,
   };
 }

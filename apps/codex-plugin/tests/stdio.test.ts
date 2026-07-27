@@ -27,12 +27,15 @@ describe("Codex plugin stdio MCP", () => {
     await mkdir(join(root, "mcp"), { recursive: true });
     await cp(BUILT_SERVER, join(root, "mcp", "server.mjs"));
     await writeFile(join(root, "distribution.json"), JSON.stringify(IDENTITY));
+    const channelRoot = join(root, "suite", "beta");
 
     const transport = new StdioClientTransport({
       args: [
         "./mcp/server.mjs",
         "--identity-file",
         "./distribution.json",
+        "--distribution-channel-root",
+        channelRoot,
       ],
       command: process.execPath,
       cwd: root,
@@ -56,6 +59,21 @@ describe("Codex plugin stdio MCP", () => {
       expect(result.structuredContent).toEqual({
         fixture: { configured: false },
         identity: IDENTITY,
+        suite: {
+          configured: true,
+          paths: {
+            cacheRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "cache"),
+            channel: IDENTITY.channel,
+            channelRoot,
+            dataRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "data"),
+            logsRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "logs"),
+            namespace: IDENTITY.namespace,
+            namespaceBaseRoot: join(channelRoot, "namespaces"),
+            namespaceRoot: join(channelRoot, "namespaces", IDENTITY.namespace),
+            runtimeRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "runtime"),
+            updatesRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "updates"),
+          },
+        },
       });
       const resource = await client.readResource({
         uri: "od://distribution/identity",

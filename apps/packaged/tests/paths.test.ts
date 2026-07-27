@@ -2,6 +2,8 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { resolveDistributionSuitePaths } from "@open-design/distribution-proto";
+
 import type { PackagedConfig } from "../src/config.js";
 import { PackagedPathAccessError } from "../src/errors.js";
 import { resolvePackagedNamespacePaths } from "../src/paths.js";
@@ -54,6 +56,31 @@ describe("resolvePackagedNamespacePaths", () => {
     expect(paths.dataRoot).toBe(join(paths.namespaceRoot, "data"));
     expect(paths.updateRoot).toBe(join(paths.namespaceRoot, "updates"));
     expect(paths.installerObservationRoot).toBe(join(paths.dataRoot, "observations", "installer"));
+  });
+
+  it("is a compatibility wrapper over the shared distribution suite resolver", () => {
+    const config = fakeConfig();
+    const packaged = resolvePackagedNamespacePaths(config, config.namespace);
+    const shared = resolveDistributionSuitePaths({
+      channel: "stable",
+      namespace: config.namespace,
+      namespaceBaseRoot: config.namespaceBaseRoot,
+      platform: "win32",
+    });
+
+    expect(packaged).toMatchObject({
+      cacheRoot: shared.cacheRoot,
+      channel: shared.channel,
+      channelRoot: shared.channelRoot,
+      dataRoot: shared.dataRoot,
+      logsRoot: shared.logsRoot,
+      namespace: shared.namespace,
+      namespaceBaseRoot: shared.namespaceBaseRoot,
+      namespaceRoot: shared.namespaceRoot,
+      runtimeRoot: shared.runtimeRoot,
+      updateRoot: shared.updatesRoot,
+    });
+    expect(packaged.installationRoot).toBe(shared.channelRoot);
   });
 
   it("rejects namespace overrides that would escape the namespace base root", () => {

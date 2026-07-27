@@ -9,10 +9,12 @@ import {
   type LauncherRuntimeDescriptor,
   type LauncherVersionPaths,
 } from "@open-design/launcher-proto";
-import { SIDECAR_DEFAULTS } from "@open-design/sidecar-proto";
-import { releaseChannelFromNamespace, releaseChannelFromVersion } from "@open-design/release";
 
-import type { ToolPackConfig, ToolPackPlatform } from "./config.js";
+import {
+  resolveToolPackDistributionChannel,
+  type ToolPackConfig,
+  type ToolPackPlatform,
+} from "./config.js";
 
 export type ToolPackLauncherLayout = {
   channel: LauncherChannel;
@@ -34,9 +36,7 @@ export type ToolPackLauncherPayloadLayout = {
 export function resolveToolPackLauncherChannel(
   config: Pick<ToolPackConfig, "appVersion" | "namespace">,
 ): LauncherChannel {
-  return releaseChannelFromVersion(config.appVersion)
-    ?? releaseChannelFromNamespace(config.namespace, SIDECAR_DEFAULTS.namespace)
-    ?? "stable";
+  return resolveToolPackDistributionChannel(config);
 }
 
 export function resolveToolPackLauncherRoot(

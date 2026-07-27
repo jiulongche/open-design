@@ -4,17 +4,29 @@ This harness validates the Codex plugin as a distribution shell homologous to
 the packaged Open Design Desktop shell:
 
 ```text
-neutral OD distribution identity
+shared OD suite substrate
+├── channel + namespace + canonical suite paths
+├── shared runtime/store + daemon data
 ├── Desktop shell: packaged + desktop
 └── Codex shell: codex-plugin
 
-shared coordinate: channel + runtimeVersion + runtimeDigest + protocolVersion
+shared coordinate: channel + namespace + runtimeVersion + runtimeDigest + protocolVersion
 shell coordinate: shellType + shellVersion + shellDigest
 ```
 
 The Codex plugin is distributed independently from Open Design Desktop. It does
-not consume packaged launcher pointers or require an installed Open Design app.
-Both shells ultimately target the same neutral OD runtime identity.
+not require an installed Open Design app or consume Desktop-only lifecycle
+state. Once configured for the same channel root and namespace, both shells
+resolve the same suite runtime/store and daemon data instead of maintaining
+parallel copies.
+
+The current local bootstrap accepts an explicit suite binding through
+`--distribution-channel-root <absolute-path>` or
+`OD_DISTRIBUTION_CHANNEL_ROOT`. It then resolves the identity's namespace with
+`packages/distribution-proto`, including the same `OD_DATA_DIR` scoping rules
+as packaged. Without that binding, the read-only status tool reports
+`suite.configured: false`; runtime acquisition and handoff must not guess a
+different root.
 
 ## Ownership and safety model
 

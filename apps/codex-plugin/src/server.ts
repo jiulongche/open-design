@@ -13,14 +13,17 @@ import {
   resolveFixtureReportUrl,
   resolveIdentityFile,
 } from "./identity.js";
+import { observeCodexPluginSuite } from "./suite.js";
 
 const STATUS_TOOL_NAME = "get_open_design_status";
 const IDENTITY_RESOURCE_URI = "od://distribution/identity";
 
 async function run(): Promise<void> {
-  const identityFile = resolveIdentityFile(process.argv.slice(2));
+  const args = process.argv.slice(2);
+  const identityFile = resolveIdentityFile(args);
   const identity = await readDistributionIdentity(identityFile);
-  const fixtureReportUrl = resolveFixtureReportUrl(process.argv.slice(2));
+  const fixtureReportUrl = resolveFixtureReportUrl(args);
+  const suite = observeCodexPluginSuite({ args, identity });
 
   const server = new Server(
     {
@@ -90,6 +93,7 @@ async function run(): Promise<void> {
     const status = await readCodexPluginStatus({
       fixtureReportUrl,
       identity,
+      suite,
     });
     return {
       content: [

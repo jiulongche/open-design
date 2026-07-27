@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { join, resolve } from "node:path";
 
+import { resolveDistributionSuitePaths } from "@open-design/distribution-proto";
+
 import { resolveToolPackConfig, WORKSPACE_ROOT } from "../src/config.js";
 
 const savedTelemetryRelayUrl = process.env.OPEN_DESIGN_TELEMETRY_RELAY_URL;
@@ -121,6 +123,19 @@ describe("resolveToolPackConfig namespace defaults", () => {
     expect(resolveToolPackConfig("mac", { appVersion: "0.8.0-beta.4", namespace: "custom-beta" }).namespace).toBe(
       "custom-beta",
     );
+  });
+
+  it("derives runtime namespace roots through the shared suite resolver", () => {
+    const config = resolveToolPackConfig("win", {
+      appVersion: "0.8.0-beta.4",
+    });
+    const shared = resolveDistributionSuitePaths({
+      channel: "beta",
+      namespace: config.namespace,
+      namespaceBaseRoot: config.roots.runtime.namespaceBaseRoot,
+    });
+
+    expect(config.roots.runtime.namespaceRoot).toBe(shared.namespaceRoot);
   });
 });
 

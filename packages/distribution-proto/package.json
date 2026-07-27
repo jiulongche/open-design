@@ -3,7 +3,7 @@
   "version": "0.16.1",
   "private": true,
   "type": "module",
-  "description": "Neutral Open Design distribution identity and report protocol.",
+  "description": "Shell-neutral Open Design suite coordinate, path, identity, and report protocol.",
   "main": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
   "files": [

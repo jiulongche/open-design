@@ -1,11 +1,13 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import {
   DISTRIBUTION_REPORT_SCHEMA_VERSION,
   DISTRIBUTION_SHELL_TYPES,
+  DISTRIBUTION_SUITE_PATH_ERROR_CODES,
   DistributionProtocolError,
+  DistributionSuitePathError,
   assertSameDistributionIdentity,
   calculateDistributionArtifactInventory,
   normalizeDistributionIdentity,
@@ -13,6 +15,7 @@ import {
   normalizeDistributionVersion,
   parseDistributionBuildReport,
   parseDistributionServeReport,
+  resolveDistributionSuitePaths,
   type DistributionIdentityV1,
 } from "../src/index.js";
 
@@ -51,6 +54,92 @@ describe("@open-design/distribution-proto", () => {
     expect(normalizeDistributionIdentity(identity({
       shellVersion: "2.0.0",
     })).shellVersion).toBe("2.0.0");
+  });
+
+  it("resolves one shared channel and namespace suite layout for every shell", () => {
+    const channelRoot = resolve("/tmp/open-design-beta");
+    const paths = resolveDistributionSuitePaths({
+      channel: "beta",
+      namespace: "release-beta",
+      namespaceBaseRoot: join(channelRoot, "namespaces"),
+    });
+
+    expect(paths).toEqual({
+      cacheRoot: join(channelRoot, "namespaces", "release-beta", "cache"),
+      channel: "beta",
+      channelRoot,
+      dataRoot: join(channelRoot, "namespaces", "release-beta", "data"),
+      logsRoot: join(channelRoot, "namespaces", "release-beta", "logs"),
+      namespace: "release-beta",
+      namespaceBaseRoot: join(channelRoot, "namespaces"),
+      namespaceRoot: join(channelRoot, "namespaces", "release-beta"),
+      runtimeRoot: join(channelRoot, "namespaces", "release-beta", "runtime"),
+      updatesRoot: join(channelRoot, "namespaces", "release-beta", "updates"),
+    });
+  });
+
+  it("keeps shared data-root overrides namespace scoped", () => {
+    const channelRoot = resolve("/tmp/open-design-beta");
+    const sharedDataBase = resolve("/tmp/open-design-data");
+    const stable = resolveDistributionSuitePaths({
+      channel: "stable",
+      dataDir: sharedDataBase,
+      namespace: "release-stable",
+      namespaceBaseRoot: join(channelRoot, "namespaces"),
+    });
+    const beta = resolveDistributionSuitePaths({
+      channel: "beta",
+      dataDir: sharedDataBase,
+      namespace: "release-beta",
+      namespaceBaseRoot: join(channelRoot, "namespaces"),
+    });
+
+    expect(stable.dataRoot).toBe(
+      join(sharedDataBase, "namespaces", "release-stable", "data"),
+    );
+    expect(beta.dataRoot).toBe(
+      join(sharedDataBase, "namespaces", "release-beta", "data"),
+    );
+    expect(stable.dataRoot).not.toBe(beta.dataRoot);
+  });
+
+  it("rejects relative and cross-namespace shared data roots with typed errors", () => {
+    expect(() => resolveDistributionSuitePaths({
+      channel: "beta",
+      dataDir: "relative/data",
+      namespace: "release-beta",
+      namespaceBaseRoot: resolve("/tmp/open-design-beta/namespaces"),
+      platform: "linux",
+    })).toThrowError(expect.objectContaining({
+      code: DISTRIBUTION_SUITE_PATH_ERROR_CODES.DATA_ROOT_NOT_ABSOLUTE,
+    }));
+
+    const mismatched = join(
+      resolve("/tmp/open-design-beta"),
+      "namespaces",
+      "release-stable",
+      "data",
+    );
+    expect(() => resolveDistributionSuitePaths({
+      channel: "beta",
+      dataDir: mismatched,
+      namespace: "release-beta",
+      namespaceBaseRoot: resolve("/tmp/open-design-beta/namespaces"),
+    })).toThrow(DistributionSuitePathError);
+    try {
+      resolveDistributionSuitePaths({
+        channel: "beta",
+        dataDir: mismatched,
+        namespace: "release-beta",
+        namespaceBaseRoot: resolve("/tmp/open-design-beta/namespaces"),
+      });
+    } catch (error) {
+      expect(error).toMatchObject({
+        activeNamespace: "release-beta",
+        code: DISTRIBUTION_SUITE_PATH_ERROR_CODES.DATA_ROOT_NAMESPACE_MISMATCH,
+        configuredNamespace: "release-stable",
+      });
+    }
   });
 
   it("rejects versions and inventory paths that can escape a package", () => {

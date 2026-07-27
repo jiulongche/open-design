@@ -1,16 +1,24 @@
-import { homedir } from "node:os";
-import { join, posix, win32 } from "node:path";
+import { join } from "node:path";
 
+import {
+  DISTRIBUTION_SUITE_PATH_ERROR_CODES,
+  DistributionSuitePathError,
+  resolveDistributionSuitePaths,
+  type DistributionSuitePaths,
+} from "@open-design/distribution-proto";
+import {
+  releaseChannelFromNamespace,
+  releaseChannelFromVersion,
+  type ReleaseChannel,
+} from "@open-design/release";
 import { APP_KEYS, normalizeNamespace } from "@open-design/sidecar-proto";
 
 import type { PackagedConfig } from "./config.js";
 import { PackagedPathAccessError } from "./errors.js";
 
-export type PackagedNamespacePaths = {
-  cacheRoot: string;
+export type PackagedNamespacePaths = Omit<DistributionSuitePaths, "updatesRoot"> & {
   desktopIdentityPath: string;
   desktopLogPath: string;
-  dataRoot: string;
   desktopLogsRoot: string;
   electronSessionDataRoot: string;
   electronUserDataRoot: string;
@@ -24,77 +32,45 @@ export type PackagedNamespacePaths = {
    */
   installationRoot: string;
   installerObservationRoot: string;
-  logsRoot: string;
-  namespaceRoot: string;
   resourceRoot: string;
-  runtimeRoot: string;
   updateRoot: string;
   webIdentityPath: string;
 };
 
-const HOME_BARE_TOKENS = new Set(["~", "$HOME", "${HOME}"]);
-const HOME_PREFIX_RE = /^(~|\$\{HOME\}|\$HOME)[/\\](.*)$/;
-
-function expandHomePrefix(raw: string): string {
-  if (HOME_BARE_TOKENS.has(raw)) return homedir();
-  const match = HOME_PREFIX_RE.exec(raw);
-  if (match) return join(homedir(), match[2] ?? "");
-  return raw;
+export function resolvePackagedDistributionChannel(
+  config: Pick<PackagedConfig, "appVersion" | "namespace">,
+): ReleaseChannel {
+  return releaseChannelFromVersion(config.appVersion)
+    ?? releaseChannelFromNamespace(config.namespace, "default")
+    ?? "stable";
 }
 
-function getScopedPackagedDataRootNamespace(raw: string): string | null {
-  const parts = raw.replace(/[\\/]+$/g, "").split(/[\\/]+/);
-  const last = parts.length - 1;
-  if (last < 2) return null;
-  if (parts[last - 2] !== "namespaces" || parts[last] !== "data") return null;
-  return parts[last - 1] ?? null;
-}
-
-function resolvePackagedDataRoot(
-  config: Pick<PackagedConfig, "namespaceBaseRoot">,
-  namespace: string,
-  env: NodeJS.ProcessEnv = {},
-): string {
-  const odDataDir = env.OD_DATA_DIR?.trim();
-  if (odDataDir) {
-    const expanded = expandHomePrefix(odDataDir);
-    const isAbs = process.platform === "win32"
-      ? win32.isAbsolute(expanded)
-      : posix.isAbsolute(expanded);
-    if (!isAbs) {
-      throw new PackagedPathAccessError(
-        [
-          "Open Design's packaged runtime requires OD_DATA_DIR to be an absolute path.",
-          "",
-          `Configured value: ${odDataDir}`,
-          "",
-          "Set OD_DATA_DIR to an absolute path (for example, C:\\\\Users\\\\You\\\\OpenDesign on Windows or /Users/you/OpenDesign on macOS/Linux) and relaunch Open Design.",
-        ].join("\n"),
-        { title: "Open Design cannot start with this OD_DATA_DIR" },
-      );
-    }
-    const scopedNamespace = getScopedPackagedDataRootNamespace(expanded);
-    if (scopedNamespace) {
-      if (scopedNamespace !== namespace) {
-        throw new PackagedPathAccessError(
-          [
-            "Open Design's packaged runtime requires OD_DATA_DIR to target the active namespace.",
-            "",
-            `Configured value: ${odDataDir}`,
-            `Configured namespace: ${scopedNamespace}`,
-            `Active namespace: ${namespace}`,
-            "",
-            "Use an unscoped absolute base path or relaunch the matching packaged namespace.",
-          ].join("\n"),
-          { title: "Open Design cannot start with this OD_DATA_DIR" },
-        );
-      }
-      return expanded;
-    }
-    return join(expanded, "namespaces", namespace, "data");
+function wrapPackagedSuitePathError(error: unknown): never {
+  if (!(error instanceof DistributionSuitePathError)) throw error;
+  if (error.code === DISTRIBUTION_SUITE_PATH_ERROR_CODES.DATA_ROOT_NOT_ABSOLUTE) {
+    throw new PackagedPathAccessError(
+      [
+        "Open Design's packaged runtime requires OD_DATA_DIR to be an absolute path.",
+        "",
+        `Configured value: ${error.configuredValue}`,
+        "",
+        "Set OD_DATA_DIR to an absolute path (for example, C:\\\\Users\\\\You\\\\OpenDesign on Windows or /Users/you/OpenDesign on macOS/Linux) and relaunch Open Design.",
+      ].join("\n"),
+      { title: "Open Design cannot start with this OD_DATA_DIR" },
+    );
   }
-
-  return join(config.namespaceBaseRoot, namespace, "data");
+  throw new PackagedPathAccessError(
+    [
+      "Open Design's packaged runtime requires OD_DATA_DIR to target the active namespace.",
+      "",
+      `Configured value: ${error.configuredValue}`,
+      `Configured namespace: ${error.configuredNamespace ?? "unknown"}`,
+      `Active namespace: ${error.activeNamespace ?? "unknown"}`,
+      "",
+      "Use an unscoped absolute base path or relaunch the matching packaged namespace.",
+    ].join("\n"),
+    { title: "Open Design cannot start with this OD_DATA_DIR" },
+  );
 }
 
 export function resolvePackagedNamespacePaths(
@@ -103,31 +79,42 @@ export function resolvePackagedNamespacePaths(
   env: NodeJS.ProcessEnv = {},
 ): PackagedNamespacePaths {
   const normalizedNamespace = normalizeNamespace(namespace);
-  const namespaceRoot = join(config.namespaceBaseRoot, normalizedNamespace);
-  const dataRoot = resolvePackagedDataRoot(config, normalizedNamespace, env);
-  // Channel root = parent of the `namespaces/` directory. With the default
-  // packaged layout this resolves to `<electronApp.userData>` — e.g.
-  // `~/Library/Application Support/Open Design Prerelease/` on mac. Custom
-  // `namespaceBaseRoot` overrides (tests, multi-namespace deployments)
-  // still get a usable parent here.
-  const installationRoot = join(config.namespaceBaseRoot, "..");
+  let suitePaths: DistributionSuitePaths;
+  try {
+    suitePaths = resolveDistributionSuitePaths({
+      channel: resolvePackagedDistributionChannel({
+        appVersion: config.appVersion,
+        namespace: normalizedNamespace,
+      }),
+      dataDir: env.OD_DATA_DIR,
+      namespace: normalizedNamespace,
+      namespaceBaseRoot: config.namespaceBaseRoot,
+      platform: process.platform,
+    });
+  } catch (error) {
+    wrapPackagedSuitePathError(error);
+  }
 
   return {
-    cacheRoot: join(namespaceRoot, "cache"),
-    desktopIdentityPath: join(namespaceRoot, "runtime", "desktop-root.json"),
-    desktopLogPath: join(namespaceRoot, "logs", APP_KEYS.DESKTOP, "latest.log"),
-    dataRoot,
-    desktopLogsRoot: join(namespaceRoot, "logs", APP_KEYS.DESKTOP),
-    electronSessionDataRoot: join(namespaceRoot, "user-data", "session"),
-    electronUserDataRoot: join(namespaceRoot, "user-data"),
-    headlessIdentityPath: join(namespaceRoot, "runtime", "headless-root.json"),
-    installationRoot,
-    installerObservationRoot: join(dataRoot, "observations", "installer"),
-    logsRoot: join(namespaceRoot, "logs"),
-    namespaceRoot,
+    cacheRoot: suitePaths.cacheRoot,
+    channel: suitePaths.channel,
+    channelRoot: suitePaths.channelRoot,
+    dataRoot: suitePaths.dataRoot,
+    desktopIdentityPath: join(suitePaths.runtimeRoot, "desktop-root.json"),
+    desktopLogPath: join(suitePaths.logsRoot, APP_KEYS.DESKTOP, "latest.log"),
+    desktopLogsRoot: join(suitePaths.logsRoot, APP_KEYS.DESKTOP),
+    electronSessionDataRoot: join(suitePaths.namespaceRoot, "user-data", "session"),
+    electronUserDataRoot: join(suitePaths.namespaceRoot, "user-data"),
+    headlessIdentityPath: join(suitePaths.runtimeRoot, "headless-root.json"),
+    installationRoot: suitePaths.channelRoot,
+    installerObservationRoot: join(suitePaths.dataRoot, "observations", "installer"),
+    logsRoot: suitePaths.logsRoot,
+    namespace: suitePaths.namespace,
+    namespaceBaseRoot: suitePaths.namespaceBaseRoot,
+    namespaceRoot: suitePaths.namespaceRoot,
     resourceRoot: config.resourceRoot,
-    runtimeRoot: join(namespaceRoot, "runtime"),
-    updateRoot: join(namespaceRoot, "updates"),
-    webIdentityPath: join(namespaceRoot, "runtime", "web-root.json"),
+    runtimeRoot: suitePaths.runtimeRoot,
+    updateRoot: suitePaths.updatesRoot,
+    webIdentityPath: join(suitePaths.runtimeRoot, "web-root.json"),
   };
 }

@@ -33,6 +33,8 @@ function fakeStop(pid: number, opts: { forced?: boolean; survived?: boolean } = 
 function fakePaths(root: string): PackagedNamespacePaths {
   return {
     cacheRoot: join(root, "cache"),
+    channel: "stable",
+    channelRoot: join(root, "..", ".."),
     dataRoot: join(root, "data"),
     desktopIdentityPath: join(root, "runtime", "desktop-root.json"),
     desktopLogPath: join(root, "logs", "desktop", "latest.log"),
@@ -43,6 +45,8 @@ function fakePaths(root: string): PackagedNamespacePaths {
     installationRoot: root,
     installerObservationRoot: join(root, "data", "observations", "installer"),
     logsRoot: join(root, "logs"),
+    namespace: "default",
+    namespaceBaseRoot: join(root, ".."),
     namespaceRoot: root,
     resourceRoot: join(root, "resources", "open-design"),
     runtimeRoot: join(root, "runtime"),

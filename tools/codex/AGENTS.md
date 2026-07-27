@@ -72,9 +72,12 @@ Adjacent owners:
 
 - `apps/codex-plugin/src/server.ts` — plugin-owned stdio MCP server.
 - `apps/codex-plugin/src/identity.ts` — embedded distribution identity.
+- `apps/codex-plugin/src/suite.ts` — explicit channel-root binding onto the
+  shared suite path resolver.
 - `apps/codex-plugin/plugin/open-design/` — Codex manifest, skill, and assets.
-- `packages/distribution-proto/src/index.ts` — neutral identity, report, path,
-  version, digest, and canonical artifact-inventory rules.
+- `packages/distribution-proto/src/index.ts` — shared channel/namespace suite
+  paths, neutral identity/report, version, digest, and canonical
+  artifact-inventory rules.
 - `tools/pack/src/codex-plugin.ts` — relocatable marketplace and build report.
 - `tools/serve/src/codex-plugin-fixture.ts` — optional identity-bound loopback
   fixture.

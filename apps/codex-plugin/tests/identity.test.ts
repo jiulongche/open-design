@@ -11,6 +11,11 @@ import {
   resolveFixtureReportUrl,
   resolveIdentityFile,
 } from "../src/identity.js";
+import {
+  DISTRIBUTION_CHANNEL_ROOT_ENV,
+  observeCodexPluginSuite,
+  resolveCodexPluginDistributionChannelRoot,
+} from "../src/suite.js";
 
 const RUNTIME_DIGEST = `sha256:${"a".repeat(64)}`;
 const SHELL_DIGEST = `sha256:${"b".repeat(64)}`;
@@ -71,5 +76,32 @@ describe("codex plugin identity", () => {
 
   it("keeps the status tool available when no fixture is configured", async () => {
     expect(await observeFixture(IDENTITY, null)).toEqual({ configured: false });
+  });
+
+  it("maps the Codex shell onto the shared distribution suite paths", () => {
+    const channelRoot = join(tmpdir(), "open-design-beta");
+    expect(resolveCodexPluginDistributionChannelRoot([], {
+      [DISTRIBUTION_CHANNEL_ROOT_ENV]: channelRoot,
+    })).toBe(channelRoot);
+    expect(observeCodexPluginSuite({
+      env: {
+        [DISTRIBUTION_CHANNEL_ROOT_ENV]: channelRoot,
+      },
+      identity: IDENTITY,
+    })).toEqual({
+      configured: true,
+      paths: {
+        cacheRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "cache"),
+        channel: IDENTITY.channel,
+        channelRoot,
+        dataRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "data"),
+        logsRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "logs"),
+        namespace: IDENTITY.namespace,
+        namespaceBaseRoot: join(channelRoot, "namespaces"),
+        namespaceRoot: join(channelRoot, "namespaces", IDENTITY.namespace),
+        runtimeRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "runtime"),
+        updatesRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "updates"),
+      },
+    });
   });
 });
