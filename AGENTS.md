@@ -9,10 +9,10 @@ This file is the single source of truth for agents entering this repository. Rea
 - Architecture and protocols: `docs/architecture.md`, `docs/skills-protocol.md`, `docs/agent-adapters.md`, `docs/modes.md`.
 - Historical product baseline: `docs/spec.md`, `docs/roadmap.md` (both explicitly archived; do not treat their dated decisions as current behavior).
 - References and current plans: `docs/references.md`, `docs/code-review-guidelines.md`, `specs/current/maintainability-roadmap.md`, `specs/current/ci.md` (CI scope confidence methodology — required before changing confidence or guard fields in `scripts/scopes.ts`).
-- Directory-level agent guidance: `.github/AGENTS.md`, `apps/AGENTS.md`, `packages/AGENTS.md`, `tools/AGENTS.md`, `e2e/AGENTS.md`.
+- Directory-level agent guidance: `.github/AGENTS.md`, `apps/AGENTS.md`, `packages/AGENTS.md`, `tools/AGENTS.md`, `e2e/AGENTS.md`; focused control-plane guides include `tools/codex/AGENTS.md` and `tools/pack/AGENTS.md`.
 - Packaged auto-update architecture and high-confidence local harness: read `tools/pack/AGENTS.md` section "Packaged auto-update architecture and harness" before touching packaged updater code, release-channel identity, installer behavior, or updater UI.
 - Packaged build cache contract: `tools/pack/CACHE.md` (determinant rules, materialization-time parameters, confidence grading — required before changing any build-cache node key).
-- Codex plugin local distribution and controlled Desktop acceptance: `docs/testing/codex-plugin-desktop.md`.
+- Codex plugin local distribution and controlled Desktop acceptance: read `tools/codex/AGENTS.md` for ownership, core files, and hot operations; use `docs/testing/codex-plugin-desktop.md` for the full protocol and report formats.
 
 ## Workspace directories
 
@@ -26,7 +26,7 @@ This file is the single source of truth for agents entering this repository. Rea
 - `apps/landing-page` is the standalone static Astro marketing and public catalog site. It reads repository content at build time and is not part of the daemon/web product runtime.
 - `packages/contracts` is the pure TypeScript web/daemon app contract layer.
 - `packages/sidecar-proto` owns the Open Design sidecar business protocol; `packages/sidecar` owns the generic sidecar runtime; `packages/platform` owns generic OS process primitives.
-- `tools/codex` is the Codex Desktop acceptance control plane. It owns a dedicated namespaced `CODEX_HOME`, plugin preparation, controlled Desktop start/stop, evidence reports, and exact layered cleanup.
+- `tools/codex` is the Codex Desktop acceptance control plane. It owns a dedicated namespaced `CODEX_HOME`, plugin preparation, controlled Desktop start/stop, evidence reports, and exact layered cleanup; read `tools/codex/AGENTS.md` before changing or operating it.
 - `tools/dev` is the local development lifecycle control plane.
 - `tools/pack` is the local packaged build/start/stop/logs control plane, packaged updater harness, installer identity/registry validation surface, and mac beta release artifact preparation surface.
 - `tools/serve` is the local fixture-service control plane; first service is `tools-serve start updater` for deterministic updater metadata and artifacts.
@@ -307,7 +307,7 @@ For a worked example of one full loop (red e2e spec → fix → green), see `e2e
 ```bash
 pnpm install
 pnpm nix:update-hash
-pnpm tools-codex status --namespace codex-smoke --json
+pnpm tools-codex status --namespace desktop-smoke --json
 pnpm tools-dev
 pnpm tools-serve start updater
 pnpm tools-dev start web
