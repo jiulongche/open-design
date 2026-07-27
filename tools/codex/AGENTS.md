@@ -24,6 +24,9 @@ The current Desktop UI lane is intentionally operator-assisted:
 - Ordinary acceptance must not use `osascript`, global keystrokes, mouse
   coordinates, clipboard replacement, or Accessibility automation to enter the
   prompt.
+- After confirming the result, the operator takes a Codex window screenshot
+  and sends it to the acceptance agent. The tool does not need to focus or
+  capture Desktop itself.
 - Do not delete or rewrite Desktop chats, drafts, window state, or host-owned
   Desktop data as cleanup.
 - VM-based macOS and Windows UI automation is a future higher-confidence lane,
@@ -181,12 +184,29 @@ Perform this checkpoint after `start --build-report` succeeds and before
 5. Confirm the displayed identity matches the current build report's channel,
    namespace, protocol version, runtime version/digest, and shell
    type/version/digest.
-6. Leave the chat and any screenshot intact when a mismatch occurs. Do not
+6. Take a screenshot that visibly includes the Codex Desktop window, the
+   acceptance prompt, and the completed plugin result, then send it to the
+   acceptance agent.
+7. Leave the chat and any screenshot intact when a mismatch occurs. Do not
    rewrite evidence or delete the session to make a rerun appear clean.
 
 The automated `invoke` lane remains required for machine-verifiable identity.
 The UI checkpoint is supplemental confidence and does not get inferred from
-CLI output. For formal UI evidence, create the
+CLI output.
+
+The acceptance agent visually inspects the supplied screenshot before creating
+formal UI evidence. It must show the Codex Desktop surface, the intended
+acceptance prompt, and the completed Open Design result. A blank/loading
+window, another application, the Codex home screen, or a crop that cannot be
+connected to the operator checkpoint does not support a `desktopUiObserved`
+PASS.
+
+The screenshot proves the visible Desktop path; the same-run automated
+invocation remains authoritative for exact digests and structured identity.
+If the screenshot must be retained locally, keep it in managed reports or
+private task resources with mode `0600`. Never commit it.
+
+For formal UI evidence, create the
 `operator-captured-desktop-ui` envelope documented in
 `docs/testing/codex-plugin-desktop.md`, using the current run marker's `runId`,
 then pass it explicitly:
