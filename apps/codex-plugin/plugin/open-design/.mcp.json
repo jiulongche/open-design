@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "open-design": {
+      "title": "Open Design",
+      "description": "Expose the Open Design distribution identity and runtime bridge.",
+      "command": "node",
+      "args": [
+        "./mcp/server.mjs",
+        "--identity-file",
+        "./distribution.json"
+      ],
+      "cwd": "."
+    }
+  }
+}

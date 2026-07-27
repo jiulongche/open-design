@@ -309,10 +309,14 @@ jobs:
       - name: Workspace unit tests
         run: |
           pnpm --filter @open-design/contracts test
+          pnpm --filter @open-design/distribution-proto test
           pnpm --filter @open-design/host test
           pnpm --filter @open-design/platform test
           pnpm --filter @open-design/sidecar test
           pnpm --filter @open-design/sidecar-proto test
+          pnpm --filter @open-design/codex-plugin test
+          pnpm --filter @open-design/tools-codex test
+          pnpm --filter @open-design/tools-serve test
           if [ "${{ needs.scopes.outputs.tools_dev_tests_required }}" = "true" ]; then
             pnpm --filter @open-design/tools-dev test
           fi

@@ -1,7 +1,11 @@
 import { isAbsolute, join, resolve, sep } from "node:path";
 
+import {
+  normalizeDistributionChannel,
+  normalizeDistributionNamespace,
+  normalizeDistributionVersion,
+} from "@open-design/distribution-proto";
 import { RELEASE_CHANNELS, type ReleaseChannel } from "@open-design/release";
-import { normalizeNamespace } from "@open-design/sidecar-proto";
 
 export const LAUNCHER_SCHEMA_VERSION = 1 as const;
 export const LAUNCHER_AFTER_QUIT_FLAG = "--od-launcher-after-quit" as const;
@@ -216,26 +220,23 @@ export function compareLauncherVersions(a: string, b: string): number {
 }
 
 export function normalizeLauncherChannel(value: unknown): LauncherChannel {
-  if (typeof value !== "string") throw new LauncherProtocolError("launcher channel must be a string");
-  const channel = value.trim();
-  if (channel !== value) throw new LauncherProtocolError("launcher channel must not contain leading or trailing whitespace");
-  if (!LAUNCHER_CHANNEL_VALUES.has(channel)) {
-    throw new LauncherProtocolError(`unsupported launcher channel: ${value}`);
+  try {
+    const channel = normalizeDistributionChannel(value);
+    if (!LAUNCHER_CHANNEL_VALUES.has(channel)) {
+      throw new LauncherProtocolError(`unsupported launcher channel: ${String(value)}`);
+    }
+    return channel;
+  } catch (error) {
+    throw new LauncherProtocolError(error instanceof Error ? error.message : String(error));
   }
-  return channel as LauncherChannel;
 }
 
 export function normalizeLauncherVersion(value: unknown): string {
-  if (typeof value !== "string") throw new LauncherProtocolError("launcher version must be a string");
-  if (value.length === 0) throw new LauncherProtocolError("launcher version must not be empty");
-  if (value !== value.trim()) throw new LauncherProtocolError("launcher version must not contain leading or trailing whitespace");
-  if (value.includes("\0")) throw new LauncherProtocolError("launcher version must not contain null bytes");
-  if (/[\\/]/.test(value)) throw new LauncherProtocolError(`launcher version must not contain path separators: ${value}`);
-  if (value === "." || value === ".." || value.includes("..")) {
-    throw new LauncherProtocolError(`launcher version must not contain relative path segments: ${value}`);
+  try {
+    return normalizeDistributionVersion(value, "launcher version");
+  } catch (error) {
+    throw new LauncherProtocolError(error instanceof Error ? error.message : String(error));
   }
-  if (isAbsolute(value)) throw new LauncherProtocolError(`launcher version must not be absolute: ${value}`);
-  return value;
 }
 
 function normalizePositiveInteger(value: unknown, label: string): number {
@@ -330,7 +331,7 @@ export function parseLauncherHandoffResumeArgs(args: readonly string[]): Launche
 
 export function normalizeLauncherNamespace(value: unknown): string {
   try {
-    return normalizeNamespace(value);
+    return normalizeDistributionNamespace(value);
   } catch (error) {
     throw new LauncherProtocolError(error instanceof Error ? error.message : String(error));
   }

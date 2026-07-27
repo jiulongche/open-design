@@ -8,6 +8,7 @@ Follow the root `AGENTS.md` and `tools/AGENTS.md` first. This tool owns small lo
 - Local static updater fixtures for desktop update IPC and packaged-runtime debugging.
 - `collab-cloud` fixture — a self-contained, in-memory stand-in for the C-lane
   cross-daemon collaboration hub (comment sync + member directory; see below).
+- Identity-bound Codex plugin runtime fixtures that consume a `tools-pack` build report.
 
 ## Rules
 

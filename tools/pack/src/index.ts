@@ -1,6 +1,7 @@
 import { cac } from "cac";
 import type { CAC } from "cac";
 
+import { packCodexPlugin, type CodexPluginBuildOptions } from "./codex-plugin.js";
 import { resolveToolPackConfig, type ToolPackCliOptions, type ToolPackPlatform } from "./config.js";
 import {
   cleanupPackedMacNamespace,
@@ -113,6 +114,21 @@ function addWinLifecycleOptions(command: CacCommand) {
 }
 
 const cli = cac("tools-pack");
+
+cli
+  .command("codex-plugin <action>", "Codex plugin commands: build")
+  .option("--channel <channel>", "OD runtime channel: stable|beta|betas|prerelease|preview")
+  .option("--dir <path>", "tools-pack output root directory")
+  .option("--json", "print JSON")
+  .option("--namespace <name>", "tool-managed artifact namespace")
+  .option("--protocol-version <version>", "OD runtime protocol version")
+  .option("--runtime-digest <digest>", "OD runtime sha256 digest")
+  .option("--runtime-version <version>", "OD runtime version")
+  .option("--shell-version <version>", "Codex plugin shell version")
+  .action(async (action: string, options: CodexPluginBuildOptions) => {
+    if (action !== "build") throw new Error(`unsupported codex-plugin action: ${action}`);
+    printJson(await packCodexPlugin(options));
+  });
 
 addMacBuildOptions(addSharedOptions(cli.command("mac <action>", "Mac packaging commands: build|install|start|stop|logs|uninstall|cleanup|inspect"))).action(
   async (action: string, options: CliOptions) => {

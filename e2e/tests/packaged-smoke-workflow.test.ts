@@ -963,6 +963,14 @@ process.stdin.on("end", () => {
     const workflow = await readFile(ciWorkflowPath, "utf8");
     const workspaceUnit = sectionBetween(workflow, "  workspace_unit_tests:", "  windows_tools_pack_payload_tests:");
 
+    for (const command of [
+      "pnpm --filter @open-design/distribution-proto test",
+      "pnpm --filter @open-design/codex-plugin test",
+      "pnpm --filter @open-design/tools-codex test",
+      "pnpm --filter @open-design/tools-serve test",
+    ]) {
+      expect(workspaceUnit).toContain(command);
+    }
     expect(workspaceUnit).toContain(`if [ "\${{ needs.scopes.outputs.tools_pack_tests_required }}" = "true" ]; then
             pnpm --filter @open-design/desktop build
             pnpm --filter @open-design/desktop test
@@ -983,6 +991,8 @@ process.stdin.on("end", () => {
     for (const file of [
       "apps/desktop/src/main.ts",
       "apps/packaged/src/index.ts",
+      "apps/codex-plugin/src/index.ts",
+      "tools/codex/src/index.ts",
       "tools/pack/src/win/installer.ts",
     ]) {
       await expect(runScopesPrint("workflow_dispatch", hot, [file])).resolves.toMatchObject({

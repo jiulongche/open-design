@@ -12,6 +12,7 @@
   "scripts": {
     "postinstall": "node ./scripts/postinstall.mjs",
     "bootstrap": "node ./scripts/postinstall.mjs",
+    "tools-codex": "pnpm exec tools-codex",
     "tools-dev": "pnpm exec tools-dev",
     "tools-pack": "pnpm exec tools-pack",
     "tools-release": "pnpm exec tools-release",
@@ -31,6 +32,7 @@
   "devDependencies": {
     "@open-design/components": "workspace:*",
     "@open-design/daemon": "workspace:*",
+    "@open-design/tools-codex": "workspace:*",
     "@open-design/tools-dev": "workspace:*",
     "@open-design/tools-pack": "workspace:*",
     "@open-design/tools-release": "workspace:*",

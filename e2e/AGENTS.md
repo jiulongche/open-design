@@ -23,6 +23,7 @@ For the current coverage posture, recent hardening work, grouped-run status, and
 - Temporary e2e Vitest env/PATH mutations, AMR fake endpoint URLs, and packaged smoke default namespaces belong behind `@/vitest/suite` helpers such as `suite.with.env(...)`, `suite.with.pathEntry(...)`, `suite.amr`, and `resolvePackagedSmokeNamespace(...)`. Do not hand-roll save/restore blocks or fixed localhost ports in individual specs.
 - `lib/playwright/`: Playwright-specific fixtures, resource accessors, route helpers, and UI actions.
 - `scripts/playwright.ts`: Playwright auxiliary subcommands such as artifact cleanup; it must not wrap `playwright test`.
+- Codex Desktop lifecycle and plugin acceptance belong to `tools/codex`, not `e2e/lib`. Keep e2e focused on product-level suites rather than host-instance operations.
 
 ## Spec and test model
 

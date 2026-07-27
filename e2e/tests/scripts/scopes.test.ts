@@ -330,6 +330,39 @@ const GOLDEN_CASES: readonly GoldenCase[] = [
     }),
   },
   {
+    name: "pull_request Codex plugin shell change maps to tools-pack tests without ui lanes",
+    context: PR,
+    files: ["apps/codex-plugin/src/index.ts"],
+    expected: expectedPlan({
+      ciMode: "hot",
+      scopes: ["tools_pack_tests_required", "workspace_validation_required"],
+      runs: ["run_windows_tools_pack_payload_tests"],
+    }),
+  },
+  {
+    name: "pull_request distribution protocol change retains the critical fallback",
+    context: PR,
+    files: ["packages/distribution-proto/src/index.ts"],
+    expected: expectedPlan({
+      ciMode: "hot",
+      scopes: [
+        "tools_pack_tests_required",
+        "ui_critical_validation_required",
+        "workspace_validation_required",
+      ],
+      runs: ["run_playwright_critical", "run_windows_tools_pack_payload_tests"],
+    }),
+  },
+  {
+    name: "pull_request tools-codex change uses workspace validation without ui lanes",
+    context: PR,
+    files: ["tools/codex/src/index.ts"],
+    expected: expectedPlan({
+      ciMode: "hot",
+      scopes: ["workspace_validation_required"],
+    }),
+  },
+  {
     name: "pull_request unknown root file arms only the fail-closed fallbacks",
     context: PR,
     files: ["mystery.xyz"],
@@ -865,7 +898,9 @@ test("the rule table classifies every file: no path escapes both fallbacks", asy
     "README.md",
     "docs/architecture.md",
     "apps/web/src/x.ts",
+    "apps/codex-plugin/src/index.ts",
     "apps/desktop/src/main.ts",
+    "tools/codex/src/index.ts",
     "tools/pack/src/build.ts",
     "mystery.xyz",
     "some/deeply/nested/unknown.bin",
@@ -891,6 +926,8 @@ test("fallback matching honors excludeWhen semantics", async () => {
   assert.equal(matchesRuleMatch("tools/pack/bin/tools-pack.mjs", workspaceFallback.match), true);
 
   assert.equal(matchesRuleMatch("tools/pack/src/build.ts", uiCriticalFallback.match), false);
+  assert.equal(matchesRuleMatch("tools/codex/src/index.ts", uiCriticalFallback.match), false);
+  assert.equal(matchesRuleMatch("apps/codex-plugin/src/index.ts", uiCriticalFallback.match), false);
   assert.equal(matchesRuleMatch("apps/desktop/src/main.ts", uiCriticalFallback.match), false);
   assert.equal(matchesRuleMatch("mystery.xyz", uiCriticalFallback.match), true);
 });

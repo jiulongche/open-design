@@ -5,11 +5,13 @@ import {
   DEFAULT_COLLAB_CLOUD_PORT,
   startCollabCloudFixtureServer,
 } from "./collab-cloud-fixture.js";
+import { startCodexPluginFixtureServer } from "./codex-plugin-fixture.js";
 import { startReleaseStorageFixtureServer } from "./release-storage-fixture.js";
 import { startUpdaterFixtureServer } from "./updater-fixture.js";
 
 type CliOptions = {
   artifactPath?: string;
+  buildReport?: string;
   channel?: ReleaseChannel;
   controlLauncherVersionMin?: string;
   controlLauncherVersionUrl?: string;
@@ -43,6 +45,29 @@ function parsePlatform(value: string | undefined): "mac" | "win" {
 }
 
 async function start(service: string, options: CliOptions): Promise<void> {
+  if (service === "codex-plugin") {
+    if (options.buildReport == null || options.buildReport.length === 0) {
+      throw new Error("tools-serve codex-plugin requires --build-report");
+    }
+    const server = await startCodexPluginFixtureServer({
+      buildReportPath: options.buildReport,
+      host: options.host,
+      port: parsePort(options.port),
+    });
+    if (options.json === true) {
+      printJson(server.info);
+    } else {
+      process.stdout.write(`tools-serve codex-plugin: ${server.info.endpointUrl}\n`);
+    }
+
+    const shutdown = () => {
+      void server.close().finally(() => process.exit(0));
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+    return;
+  }
+
   if (service === "release-storage") {
     const server = await startReleaseStorageFixtureServer({
       host: options.host,
@@ -128,6 +153,7 @@ const cli = cac("tools-serve");
 cli
   .command("start <service>", "Start a local fixture service")
   .option("--artifact-path <path>", "Serve a local update artifact file")
+  .option("--build-report <path>", "Codex plugin build report from tools-pack")
   .option("--channel <channel>", "Updater channel: stable|beta|betas|prerelease|preview", { default: "stable" })
   .option("--control-launcher-version-min <version>", "Publish control.launcher.version.min in fixture metadata")
   .option("--control-launcher-version-url <url>", "Publish control.launcher.version.url in fixture metadata")

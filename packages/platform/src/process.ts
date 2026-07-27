@@ -371,16 +371,28 @@ async function listWindowsProcessSnapshots(): Promise<ProcessSnapshot[]> {
 }
 
 /**
+ * Enumerate all running processes as `{ pid, ppid, command }` snapshots and
+ * propagate enumeration failures to callers that must distinguish an empty
+ * host from an unknown host.
+ */
+export async function listProcessSnapshotsStrict(): Promise<ProcessSnapshot[]> {
+  return process.platform === "win32"
+    ? await listWindowsProcessSnapshots()
+    : await listPosixProcessSnapshots();
+}
+
+/**
  * Enumerate all running processes as `{ pid, ppid, command }` snapshots, using
  * the platform-appropriate backend. Returns an empty list on any failure.
+ *
+ * Prefer `listProcessSnapshotsStrict` for fail-closed ownership or cleanup
+ * decisions; this compatibility helper is for best-effort diagnostics.
  *
  * @returns The current process snapshots (empty on error).
  */
 export async function listProcessSnapshots(): Promise<ProcessSnapshot[]> {
   try {
-    return process.platform === "win32"
-      ? await listWindowsProcessSnapshots()
-      : await listPosixProcessSnapshots();
+    return await listProcessSnapshotsStrict();
   } catch {
     return [];
   }

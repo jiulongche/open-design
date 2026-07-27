@@ -1,0 +1,33 @@
+{
+  "name": "open-design",
+  "version": "0.1.0",
+  "description": "Use the Open Design runtime through Codex.",
+  "author": {
+    "name": "OpenDesign",
+    "email": "support@open-design.ai",
+    "url": "https://open-design.ai"
+  },
+  "homepage": "https://open-design.ai",
+  "repository": "https://github.com/nexu-io/open-design",
+  "license": "Apache-2.0",
+  "keywords": [
+    "design",
+    "local-first",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Open Design",
+    "shortDescription": "Use the Open Design runtime from Codex.",
+    "longDescription": "Open Design is distributed through Codex as a host shell over the same Open Design runtime used by the desktop channel.",
+    "developerName": "OpenDesign",
+    "category": "Creativity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": "Check the active Open Design distribution.",
+    "brandColor": "#111111",
+    "composerIcon": "./assets/icon.svg"
+  },
+  "mcpServers": "./.mcp.json"
+}
