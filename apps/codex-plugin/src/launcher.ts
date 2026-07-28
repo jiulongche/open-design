@@ -15,6 +15,7 @@ import {
   CODEX_PLUGIN_HANDOFF_STATES,
   CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   CODEX_PLUGIN_RUNTIME_ENV,
+  CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
   compareCodexPluginShellVersions,
   parseCodexPluginAcquisitionManifest,
   parseCodexPluginHandoffDescriptor,
@@ -362,6 +363,53 @@ async function verifyRuntimeArtifact(path: string, manifest: CodexPluginAcquisit
   }
 }
 
+function runCommand(command: string, args: readonly string[]): Promise<void> {
+  return new Promise<void>((resolveRun, rejectRun) => {
+    const child = spawn(command, [...args], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.once("error", rejectRun);
+    child.once("close", (code, signal) => {
+      if (code === 0 && signal == null) {
+        resolveRun();
+        return;
+      }
+      rejectRun(new CodexPluginLauncherError(
+        "RUNTIME_EXTRACT_FAILED",
+        `${command} failed with ${signal == null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`}`,
+      ));
+    });
+  });
+}
+
+async function extractRuntimeArchive(
+  archivePath: string,
+  payloadRoot: string,
+): Promise<void> {
+  await mkdir(payloadRoot, { mode: 0o700, recursive: true });
+  if (process.platform === "darwin") {
+    await runCommand("ditto", ["-x", "-k", archivePath, payloadRoot]);
+    return;
+  }
+  if (process.platform === "win32") {
+    await runCommand("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
+      archivePath,
+      payloadRoot,
+    ]);
+    return;
+  }
+  throw new CodexPluginLauncherError(
+    "RUNTIME_EXTRACT_UNSUPPORTED",
+    `Codex plugin runtime archive extraction is unsupported on ${process.platform}`,
+  );
+}
+
 async function acquireRuntimeArtifact(options: {
   fetchImpl: typeof fetch;
   manifest: CodexPluginAcquisitionManifestV1;
@@ -376,8 +424,19 @@ async function acquireRuntimeArtifact(options: {
     versionPaths.payloadRoot,
     ...options.manifest.artifact.entryPath.split("/"),
   );
-  if (await pathExists(entryPath)) {
-    await verifyRuntimeArtifact(entryPath, options.manifest);
+  const archiveArtifactPath = join(versionPaths.versionRoot, "artifact.zip");
+  const installedArtifactPath =
+    options.manifest.artifact.mediaType === CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1
+      ? archiveArtifactPath
+      : entryPath;
+  if (await pathExists(installedArtifactPath)) {
+    await verifyRuntimeArtifact(installedArtifactPath, options.manifest);
+    if (!(await pathExists(entryPath))) {
+      throw new CodexPluginLauncherError(
+        "RUNTIME_ENTRY_MISSING",
+        `installed runtime entry is missing: ${options.manifest.artifact.entryPath}`,
+      );
+    }
     return { entryPath, reused: true };
   }
 
@@ -405,13 +464,26 @@ async function acquireRuntimeArtifact(options: {
     options.storePaths.stagingRoot,
     opaqueId("acquire"),
   );
+  const stagingPayloadRoot = join(stagingRoot, "payload");
   const stagingEntryPath = join(
-    stagingRoot,
-    "payload",
+    stagingPayloadRoot,
     ...options.manifest.artifact.entryPath.split("/"),
   );
-  await mkdir(dirname(stagingEntryPath), { mode: 0o700, recursive: true });
-  await writeFile(stagingEntryPath, bytes, { mode: 0o700 });
+  if (options.manifest.artifact.mediaType === CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1) {
+    const stagingArchivePath = join(stagingRoot, "artifact.zip");
+    await mkdir(stagingRoot, { mode: 0o700, recursive: true });
+    await writeFile(stagingArchivePath, bytes, { mode: 0o600 });
+    await extractRuntimeArchive(stagingArchivePath, stagingPayloadRoot);
+    if (!(await pathExists(stagingEntryPath))) {
+      throw new CodexPluginLauncherError(
+        "RUNTIME_ENTRY_MISSING",
+        `runtime archive does not contain ${options.manifest.artifact.entryPath}`,
+      );
+    }
+  } else {
+    await mkdir(dirname(stagingEntryPath), { mode: 0o700, recursive: true });
+    await writeFile(stagingEntryPath, bytes, { mode: 0o700 });
+  }
   await writeJsonAtomic(join(stagingRoot, "manifest.json"), options.manifest);
   await mkdir(dirname(versionPaths.versionRoot), { mode: 0o700, recursive: true });
   try {
@@ -424,7 +496,13 @@ async function acquireRuntimeArtifact(options: {
     }
     await rm(stagingRoot, { force: true, recursive: true });
   }
-  await verifyRuntimeArtifact(entryPath, options.manifest);
+  await verifyRuntimeArtifact(installedArtifactPath, options.manifest);
+  if (!(await pathExists(entryPath))) {
+    throw new CodexPluginLauncherError(
+      "RUNTIME_ENTRY_MISSING",
+      `installed runtime entry is missing: ${options.manifest.artifact.entryPath}`,
+    );
+  }
   return { entryPath, reused: false };
 }
 
@@ -710,6 +788,7 @@ export class CodexPluginRuntimeLauncher {
             [CODEX_PLUGIN_RUNTIME_ENV.DATA_ROOT]: this.suitePaths.dataRoot,
             [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_ID]: handoffId,
             [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_TOKEN]: resumeToken,
+            [CODEX_PLUGIN_RUNTIME_ENV.LOGS_ROOT]: this.suitePaths.logsRoot,
             [CODEX_PLUGIN_RUNTIME_ENV.NAMESPACE]: expected.namespace,
             [CODEX_PLUGIN_RUNTIME_ENV.PROTOCOL_VERSION]:
               expected.protocolVersion.toString(),

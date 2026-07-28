@@ -6,6 +6,7 @@ import {
   normalizeDistributionIdentity,
   parseDistributionServeReport,
   type DistributionIdentityV1,
+  type DistributionRuntimeIdentityV1,
   type DistributionServeReportV1,
 } from "@open-design/distribution-proto";
 
@@ -38,6 +39,17 @@ export type CodexPluginStatus = {
   identity: DistributionIdentityV1;
   suite: CodexPluginSuiteObservation;
 };
+
+export function currentDistributionIdentity(
+  shellIdentity: DistributionIdentityV1,
+  runtimeIdentity: DistributionRuntimeIdentityV1,
+): DistributionIdentityV1 {
+  return normalizeDistributionIdentity({
+    ...shellIdentity,
+    runtimeDigest: runtimeIdentity.runtimeDigest,
+    runtimeVersion: runtimeIdentity.runtimeVersion,
+  });
+}
 
 function valueAfterArg(args: readonly string[], name: string): string | null {
   const index = args.indexOf(name);

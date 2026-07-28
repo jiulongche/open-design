@@ -1,13 +1,15 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 import {
   CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
+  normalizeCodexPluginPlatformTarget,
   parseCodexPluginAcquisitionManifest,
   parseCodexPluginFixtureReport,
+  resolveCodexPluginReleasePaths,
   type CodexPluginAcquisitionManifestV1,
   type CodexPluginFixtureReportV1,
 } from "@open-design/codex-plugin-proto";
@@ -18,12 +20,19 @@ import {
   type DistributionBuildReportV1,
   type DistributionServeReportV1,
 } from "@open-design/distribution-proto";
+import {
+  compareReleaseBaseVersions,
+  parseReleaseBaseVersion,
+  parseReleaseVersion,
+} from "@open-design/release";
 
 export type CodexPluginFixtureOptions = {
   buildReportPath: string;
   host?: string;
   minimumShellVersion?: string;
   port?: number;
+  promotionBuildReportPath?: string;
+  promotionMinimumShellVersion?: string;
 };
 
 export type CodexPluginFixturePromotionOptions = {
@@ -36,6 +45,7 @@ export type CodexPluginFixtureServer = {
   close(): Promise<void>;
   info: CodexPluginFixtureReportV1;
   manifest: CodexPluginAcquisitionManifestV1;
+  promotionUrl: string | null;
   promote(
     options: CodexPluginFixturePromotionOptions,
   ): Promise<CodexPluginFixtureReportV1>;
@@ -50,6 +60,8 @@ type CodexPluginFixtureRelease = CodexPluginFixturePayload & {
   artifactPath: string;
   info: CodexPluginFixtureReportV1;
   manifest: CodexPluginAcquisitionManifestV1;
+  mediaType:
+    (typeof CODEX_PLUGIN_RUNTIME_MEDIA_TYPES)[keyof typeof CODEX_PLUGIN_RUNTIME_MEDIA_TYPES];
 };
 
 function listen(server: Server, port: number, host: string): Promise<void> {
@@ -132,19 +144,51 @@ function assertPromotionCoordinate(
   }
 }
 
+function compareRuntimeVersions(
+  left: DistributionBuildReportV1,
+  right: DistributionBuildReportV1,
+): number {
+  const channel = left.identity.channel;
+  const leftVersion = parseReleaseVersion(left.identity.runtimeVersion, channel);
+  const rightVersion = parseReleaseVersion(right.identity.runtimeVersion, channel);
+  const leftBase = parseReleaseBaseVersion(leftVersion.baseVersion);
+  const rightBase = parseReleaseBaseVersion(rightVersion.baseVersion);
+  if (leftBase == null || rightBase == null) {
+    throw new Error("Codex plugin fixture runtime version is invalid");
+  }
+  const baseOrder = compareReleaseBaseVersions(leftBase, rightBase);
+  if (baseOrder !== 0) return baseOrder;
+  if (leftVersion.channel === "stable" || rightVersion.channel === "stable") {
+    return 0;
+  }
+  return Math.sign(leftVersion.number - rightVersion.number);
+}
+
 function createFixtureRelease(options: {
   minimumShellVersion?: string;
   origin: string;
   payload: CodexPluginFixturePayload;
 }): CodexPluginFixtureRelease {
   const { buildReport, runtimeBytes } = options.payload;
-  const artifactPath =
-    `/codex-plugin/${buildReport.identity.channel}/versions/${buildReport.identity.runtimeVersion}/runtime/runtime.mjs`;
+  const platform = normalizeCodexPluginPlatformTarget(
+    basename(dirname(buildReport.paths.artifactRoot)),
+  );
+  const mediaType = buildReport.runtimeArtifact!.path.endsWith(".zip")
+    ? CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1
+    : CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1;
+  const releasePaths = resolveCodexPluginReleasePaths({
+    channel: buildReport.identity.channel,
+    mediaType,
+    namespace: buildReport.identity.namespace,
+    platform,
+    runtimeVersion: buildReport.identity.runtimeVersion,
+  });
+  const artifactPath = `/${releasePaths.runtimeArtifactPath}`;
   const manifest = parseCodexPluginAcquisitionManifest({
     artifact: {
       digest: buildReport.runtimeArtifact!.digest,
       entryPath: buildReport.runtimeArtifact!.entryPath,
-      mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
+      mediaType,
       size: buildReport.runtimeArtifact!.size,
       url: `${options.origin}${artifactPath}`,
     },
@@ -167,7 +211,7 @@ function createFixtureRelease(options: {
     healthUrl: `${options.origin}/health`,
     identity: buildReport.identity,
     runtimeManifestUrl:
-      `${options.origin}/codex-plugin/${buildReport.identity.channel}/latest/runtime.json`,
+      `${options.origin}/${releasePaths.latestRuntimeManifestPath}`,
     schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
   });
   return {
@@ -175,6 +219,7 @@ function createFixtureRelease(options: {
     buildReport,
     info,
     manifest,
+    mediaType,
     runtimeBytes,
   };
 }
@@ -186,11 +231,69 @@ export async function startCodexPluginFixtureServer(
   assertLoopbackHost(host);
   const initialPayload = await loadFixturePayload(options.buildReportPath);
   let current: CodexPluginFixtureRelease | null = null;
+  let origin = "";
+  let promotionUrl: string | null = null;
   const releases = new Map<string, CodexPluginFixtureRelease>();
+  const promote = async (
+    promotionOptions: CodexPluginFixturePromotionOptions,
+  ): Promise<CodexPluginFixtureReportV1> => {
+    const payload = await loadFixturePayload(promotionOptions.buildReportPath);
+    assertPromotionCoordinate(initialPayload.buildReport, payload.buildReport);
+    if (
+      current != null
+      && compareRuntimeVersions(current.buildReport, payload.buildReport) > 0
+    ) {
+      throw new Error(
+        `Codex plugin fixture promotion would move latest backward from ${current.buildReport.identity.runtimeVersion} to ${payload.buildReport.identity.runtimeVersion}`,
+      );
+    }
+    const promoted = createFixtureRelease({
+      minimumShellVersion: promotionOptions.minimumShellVersion,
+      origin,
+      payload,
+    });
+    const existing = releases.get(promoted.artifactPath);
+    if (
+      existing != null
+      && (
+        existing.buildReport.runtimeArtifact!.digest
+          !== promoted.buildReport.runtimeArtifact!.digest
+        || existing.buildReport.runtimeArtifact!.size
+          !== promoted.buildReport.runtimeArtifact!.size
+      )
+    ) {
+      throw new Error(
+        `Codex plugin fixture promotion would replace immutable artifact ${promoted.artifactPath}`,
+      );
+    }
+    if (existing == null) releases.set(promoted.artifactPath, promoted);
+    current = promoted;
+    return promoted.info;
+  };
   const server = createServer((request, response) => {
+    if (
+      request.method === "POST"
+      && promotionUrl != null
+      && request.url === new URL(promotionUrl).pathname
+    ) {
+      void promote({
+        buildReportPath: options.promotionBuildReportPath!,
+        minimumShellVersion: options.promotionMinimumShellVersion,
+      }).then(
+        (info) => sendJson(response, info),
+        (error: unknown) => {
+          response.statusCode = 409;
+          response.setHeader("content-type", "application/json; charset=utf-8");
+          response.end(`${JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          })}\n`);
+        },
+      );
+      return;
+    }
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.statusCode = 405;
-      response.setHeader("allow", "GET, HEAD");
+      response.setHeader("allow", promotionUrl == null ? "GET, HEAD" : "GET, HEAD, POST");
       response.end();
       return;
     }
@@ -227,6 +330,7 @@ export async function startCodexPluginFixtureServer(
         request.url === "/runtime/manifest.json"
         || request.url
           === `/codex-plugin/${current.buildReport.identity.channel}/latest/runtime.json`
+        || request.url === new URL(current.info.runtimeManifestUrl).pathname
       )
     ) {
       sendJson(response, current.manifest);
@@ -239,7 +343,7 @@ export async function startCodexPluginFixtureServer(
       response.statusCode = 200;
       response.setHeader(
         "content-type",
-        CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
+        release.mediaType,
       );
       response.setHeader(
         "content-length",
@@ -254,7 +358,14 @@ export async function startCodexPluginFixtureServer(
     response.end();
   });
   await listen(server, options.port ?? 0, host);
-  const origin = serverOrigin(server);
+  origin = serverOrigin(server);
+  if (
+    options.promotionBuildReportPath != null
+    && options.promotionBuildReportPath.length > 0
+  ) {
+    promotionUrl =
+      `${origin}/__tools-serve/codex-plugin/promote/${randomBytes(16).toString("hex")}`;
+  }
   current = createFixtureRelease({
     minimumShellVersion: options.minimumShellVersion,
     origin,
@@ -272,33 +383,9 @@ export async function startCodexPluginFixtureServer(
     get manifest() {
       return current!.manifest;
     },
-    async promote(promotionOptions) {
-      const payload = await loadFixturePayload(
-        promotionOptions.buildReportPath,
-      );
-      assertPromotionCoordinate(initialPayload.buildReport, payload.buildReport);
-      const promoted = createFixtureRelease({
-        minimumShellVersion: promotionOptions.minimumShellVersion,
-        origin,
-        payload,
-      });
-      const existing = releases.get(promoted.artifactPath);
-      if (
-        existing != null
-        && (
-          existing.buildReport.runtimeArtifact!.digest
-            !== promoted.buildReport.runtimeArtifact!.digest
-          || existing.buildReport.runtimeArtifact!.size
-            !== promoted.buildReport.runtimeArtifact!.size
-        )
-      ) {
-        throw new Error(
-          `Codex plugin fixture promotion would replace immutable artifact ${promoted.artifactPath}`,
-        );
-      }
-      if (existing == null) releases.set(promoted.artifactPath, promoted);
-      current = promoted;
-      return promoted.info;
+    get promotionUrl() {
+      return promotionUrl;
     },
+    promote,
   };
 }

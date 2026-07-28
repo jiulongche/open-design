@@ -448,7 +448,7 @@ jobs:
       - name: Compute mac_arm64 tools-pack cache key
         id: mac_arm64_tools_pack_cache_key
         env:
-          MAC_TOOLS_PACK_ORIGIN_KEY: ${{ hashFiles('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'apps/daemon/**', 'apps/web/**', 'apps/desktop/**', 'apps/packaged/**', 'packages/agui-adapter/**', 'packages/contracts/**', 'packages/plugin-runtime/**', 'packages/sidecar-proto/**', 'packages/sidecar/**', 'packages/platform/**', 'tools/pack/bin/**', 'tools/pack/package.json', 'tools/pack/resources/**', 'tools/pack/src/**', 'tools/pack/tsconfig.json', 'assets/community-pets/**', 'assets/frames/**', 'craft/**', 'design-systems/**', 'design-templates/**', 'plugins/_official/**', 'plugins/registry/**', 'prompt-templates/**', 'skills/**', '.github/workflows/release-beta.yml', '.github/scripts/release/cache/mac.sh') }}
+          MAC_TOOLS_PACK_ORIGIN_KEY: ${{ hashFiles('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'apps/codex-plugin/**', 'apps/daemon/**', 'apps/web/**', 'apps/desktop/**', 'apps/packaged/**', 'packages/agui-adapter/**', 'packages/codex-plugin-proto/**', 'packages/contracts/**', 'packages/diagnostics/**', 'packages/distribution-proto/**', 'packages/download/**', 'packages/host/**', 'packages/launcher-proto/**', 'packages/plugin-runtime/**', 'packages/registry-protocol/**', 'packages/release/**', 'packages/sidecar-proto/**', 'packages/sidecar/**', 'packages/platform/**', 'tools/pack/bin/**', 'tools/pack/package.json', 'tools/pack/resources/**', 'tools/pack/src/**', 'tools/pack/tsconfig.json', 'tools/release/src/codex-plugin/**', 'assets/community-pets/**', 'assets/frames/**', 'craft/**', 'design-systems/**', 'design-templates/**', 'plugins/_official/**', 'plugins/registry/**', 'prompt-templates/**', 'skills/**', '.github/workflows/release-beta.yml', '.github/scripts/release/cache/mac.sh') }}
         run: |
           set -euo pipefail
           if [ -z "$MAC_TOOLS_PACK_ORIGIN_KEY" ]; then
@@ -677,6 +677,41 @@ jobs:
           OD_PACKAGED_E2E_REPORT_DIR: ${{ runner.temp }}/release-report/mac_arm64
           OD_PACKAGED_E2E_TOOLS_PACK_DIR: ${{ runner.temp }}/tools-pack
         run: pnpm exec tsx scripts/release-smoke.ts mac specs/mac.spec.ts
+
+      - name: Build beta mac_arm64 Codex plugin runtime
+        run: |
+          set -euo pipefail
+          pnpm exec tools-pack codex-plugin build \
+            --channel beta \
+            --namespace release-beta \
+            --platform darwin-arm64 \
+            --runtime-version "${{ needs.metadata.outputs.beta_version }}" \
+            --runtime-mode production \
+            --dir "$RUNNER_TEMP/codex-plugin-tools-pack" \
+            --json \
+            > "$RUNNER_TEMP/release-build/codex-plugin-mac-arm64.json"
+
+      - name: Plan or publish beta mac_arm64 Codex plugin runtime
+        env:
+          CODEX_PLUGIN_BUILD_REPORT: ${{ runner.temp }}/codex-plugin-tools-pack/out/codex-plugin/namespaces/release-beta/darwin-arm64/build-report.json
+          CODEX_PLUGIN_PLATFORM: darwin-arm64
+          CODEX_PLUGIN_PUBLICATION_REPORT: ${{ runner.temp }}/release-report/codex-plugin-mac-arm64.json
+          RELEASE_DRY_RUN_MODE: release-beta
+          RELEASE_PUBLIC_ORIGIN: ${{ inputs.release_public_origin != '' && inputs.release_public_origin || vars.CLOUDFLARE_R2_RELEASES_PUBLIC_ORIGIN }}
+          RELEASE_PUBLISH_SIDE_EFFECTS: ${{ inputs.publish && 'true' || 'false' }}
+          RELEASE_STORAGE_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_RELEASES_AK }}
+          RELEASE_STORAGE_BUCKET: ${{ secrets.CLOUDFLARE_R2_RELEASES_BUCKET }}
+          RELEASE_STORAGE_ENDPOINT: ${{ secrets.CLOUDFLARE_R2_RELEASES_URL }}
+          RELEASE_STORAGE_REGION: auto
+          RELEASE_STORAGE_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_RELEASES_SK }}
+        run: pnpm exec tools-release publish-codex-plugin
+
+      - name: Publish Codex plugin runtime summary
+        if: ${{ always() }}
+        run: |
+          if [ -f "$RUNNER_TEMP/release-report/codex-plugin-mac-arm64.json.md" ]; then
+            cat "$RUNNER_TEMP/release-report/codex-plugin-mac-arm64.json.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Write mac_arm64 release report
         if: ${{ always() }}

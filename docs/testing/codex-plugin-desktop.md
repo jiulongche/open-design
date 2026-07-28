@@ -77,10 +77,12 @@ The report path is:
 ```
 
 `paths.artifactRoot` is the relocatable marketplace.
-`runtimeArtifact` is an acceptance-only external runtime fixture, not plugin
-shell content. `artifact.files` includes the platform carrier and excludes the
-generated `distribution.json`; the identity binds its digest as
-`shellDigest`.
+With `--runtime-mode production`, `runtimeArtifact` is a ZIP containing the
+real daemon, static web, required internal packages, and resources. It is
+published independently from the marketplace shell. The default fixture mode
+remains available for cheap protocol tests. `artifact.files` includes the
+platform carrier and excludes the generated `distribution.json`; the identity
+binds its digest as `shellDigest`.
 
 ## Offline shell gate
 
@@ -104,11 +106,14 @@ Start the identity-bound loopback fixture:
 ```bash
 pnpm tools-serve start codex-plugin \
   --build-report <build-report> \
+  --promotion-build-report <next-build-report> \
   --json
 ```
 
-The result exposes `runtimeManifestUrl`; `/report` remains the status fixture.
-The fixture no longer serves an environment/Node artifact.
+The result exposes `runtimeManifestUrl` and, when a next report is configured,
+an unguessable `promotionUrl`; `/report` remains the status fixture. A
+`POST <promotionUrl>` validates the pre-bound next build before switching
+`latest`. The fixture no longer serves an environment/Node artifact.
 
 After the managed environment is initialized and the matching plugin is
 prepared as described below, probe runtime acquisition:
@@ -147,35 +152,76 @@ runtime lifecycle with:
 - real `codex --enable plugins exec --json` calls to
   `ensure_open_design_runtime`.
 
-The fixture's programmatic `promote` operation keeps the same
+The fixture's programmatic or loopback HTTP promotion keeps the same
 `runtimeManifestUrl`, loads and validates the next build report before
 switching `latest`, and continues serving all earlier immutable artifact URLs.
-It rejects channel/namespace/protocol or shell identity drift, and rejects
-different bytes published at an existing runtime version URL.
+It rejects channel/namespace/protocol or shell identity drift, latest rollback,
+and different bytes published at an existing runtime version URL.
 
 The required lifecycle sequence is:
 
 1. Acquire N through the installed plugin and confirm its manifest, binding,
    active pointer, immutable store entry, and ready handoff.
-2. While N remains alive in the same Codex CLI host, promote `latest` to N+1
-   and require the next ensure call to fail closed on the identity mismatch.
-3. Exit that host, start a new isolated CLI call, recover its stale binding,
-   acquire N+1, and retain both immutable version directories.
-4. In one live CLI host, call ensure twice for N+1 and require the second call
-   to return `attached:true` and `reusedArtifact:true`.
-5. Promote to a validly hashed runtime that exits before ready; require the
+2. While N remains alive, promote `latest` to N+1 and require the next ensure
+   call to fail closed with `INCOMPATIBLE_RUNTIME_ACTIVE`.
+3. Stop only the exact runtime PID from the confirmed binding. Runtime takeover
+   and cross-shell exit orchestration are intentionally outside this cold-start
+   scope.
+4. Repeat handoff through the original installed shell. Require acquisition of
+   N+1, retention of both immutable version directories, and a current identity
+   whose shell fields are unchanged while runtime fields advance.
+5. Invoke the same installed plugin through real
+   `codex --enable plugins exec --json`; require `attached:true` and
+   `reusedArtifact:true` for N+1.
+6. Promote to a validly hashed runtime that exits before ready; require the
    tool call to fail and the active pointer to remain on N+1 with no live
    binding or temporary handoff state.
-6. Serve a newer manifest whose minimum shell version excludes the installed
+7. Serve a newer manifest whose minimum shell version excludes the installed
    shell; require selection and startup of the newest compatible installed
    runtime instead.
 
-An ephemeral `codex exec` host ends its plugin/runtime process tree when the
-CLI exits. Live-owner and attach checks therefore use consecutive tool calls
-inside one CLI process; separate CLI calls intentionally exercise stale-owner
-recovery. Preserve Codex JSONL, fixture identity, `active.json`, binding
-evidence, and immutable store inventory as the acceptance record. No UI
+The production runtime is detached after a confirmed handoff and can outlive an
+ephemeral `codex exec` host. Do not infer exit from CLI completion. Preserve
+Codex JSONL, fixture identity, `active.json`, binding evidence, exact controlled
+exit evidence, and immutable store inventory as the acceptance record. No UI
 screenshot is required for this non-Desktop gate.
+
+`get_open_design_status` reports the immutable identity embedded when the shell
+was built. After runtime promotion, `ensure_open_design_runtime` is the
+authoritative current identity: it combines those shell fields with the
+selected binding's runtime fields.
+
+For non-interactive CLI acceptance, a mutating MCP tool still follows Codex's
+approval policy. Use an operator-persisted approval or the explicitly
+controlled `--dangerously-bypass-approvals-and-sandbox` acceptance invocation;
+`--ask-for-approval never` cancels the tool call rather than approving it.
+
+## Production publication
+
+The runtime publisher consumes the target-host build report and writes only
+the Codex plugin R2 hierarchy:
+
+```text
+codex-plugin/<channel>/<namespace>/<platform>/
+├── latest/runtime.json
+└── versions/<runtime-version>/runtime/runtime.zip
+```
+
+Run a side-effect-free plan locally:
+
+```bash
+CODEX_PLUGIN_BUILD_REPORT=<build-report> \
+CODEX_PLUGIN_PLATFORM=darwin-arm64 \
+CODEX_PLUGIN_PUBLICATION_REPORT=<report.json> \
+RELEASE_PUBLIC_ORIGIN=https://releases.open-design.ai \
+RELEASE_PUBLISH_SIDE_EFFECTS=false \
+pnpm tools-release publish-codex-plugin
+```
+
+Immutable runtime uploads refuse replacement. `latest` uses conditional writes
+and refuses rollback or a same-version digest change. `release-beta` builds and
+plans this payload on every macOS arm64 run, publishing it only when the
+workflow's existing `publish` input is true.
 
 ## Managed acceptance environment
 

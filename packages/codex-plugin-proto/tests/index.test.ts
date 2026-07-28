@@ -15,6 +15,7 @@ import {
   parseCodexPluginFixtureReport,
   parseCodexPluginHandoffDescriptor,
   parseCodexPluginRuntimeReady,
+  resolveCodexPluginReleasePaths,
   resolveCodexPluginShellPaths,
   resolveCodexPluginSuitePaths,
 } from "../src/index.js";
@@ -98,6 +99,14 @@ describe("@open-design/codex-plugin-proto", () => {
 
   it("parses a loopback acquisition manifest bound to one runtime digest", () => {
     expect(parseCodexPluginAcquisitionManifest(manifest())).toEqual(manifest());
+    expect(parseCodexPluginAcquisitionManifest({
+      ...manifest(),
+      artifact: {
+        ...manifest().artifact,
+        mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1,
+        url: "http://127.0.0.1:17456/runtime.zip",
+      },
+    }).artifact.mediaType).toBe(CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1);
     expect(() => parseCodexPluginAcquisitionManifest({
       ...manifest(),
       artifact: {
@@ -213,5 +222,21 @@ describe("@open-design/codex-plugin-proto", () => {
     expect(() => normalizeCodexPluginPlatformTarget("linux-x64")).toThrow(
       "unsupported Codex plugin platform target",
     );
+  });
+
+  it("resolves one production path family per channel, namespace, and platform", () => {
+    expect(resolveCodexPluginReleasePaths({
+      channel: "beta",
+      mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1,
+      namespace: "release-beta",
+      platform: CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
+      runtimeVersion: "1.2.3-beta.4",
+    })).toEqual({
+      latestRuntimeManifestPath:
+        "codex-plugin/beta/release-beta/darwin-arm64/latest/runtime.json",
+      root: "codex-plugin/beta/release-beta/darwin-arm64",
+      runtimeArtifactPath:
+        "codex-plugin/beta/release-beta/darwin-arm64/versions/1.2.3-beta.4/runtime/runtime.zip",
+    });
   });
 });

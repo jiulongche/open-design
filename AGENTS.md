@@ -310,6 +310,8 @@ pnpm install
 pnpm nix:update-hash
 pnpm tools-codex status --namespace desktop-smoke --json
 pnpm tools-dev
+pnpm tools-pack codex-plugin build --channel beta --namespace release-beta --runtime-version <x.y.z-beta.N> --runtime-mode production --json
+pnpm tools-release publish-codex-plugin
 pnpm tools-serve start updater
 pnpm tools-dev start web
 pnpm tools-dev run web --daemon-port 17456 --web-port 17573

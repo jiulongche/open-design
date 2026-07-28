@@ -1,0 +1,317 @@
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import {
+  chmod,
+  cp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
+
+import {
+  CODEX_PLUGIN_RUNTIME_ENV,
+  CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
+} from "@open-design/codex-plugin-proto";
+import { createPackageManagerInvocation } from "@open-design/platform";
+
+import { copyBundledResourceTrees } from "./resources.js";
+
+const RUNTIME_INTERNAL_PACKAGES = [
+  { directory: "packages/release", name: "@open-design/release" },
+  { directory: "packages/contracts", name: "@open-design/contracts" },
+  { directory: "packages/registry-protocol", name: "@open-design/registry-protocol" },
+  { directory: "packages/sidecar-proto", name: "@open-design/sidecar-proto" },
+  { directory: "packages/distribution-proto", name: "@open-design/distribution-proto" },
+  { directory: "packages/launcher-proto", name: "@open-design/launcher-proto" },
+  { directory: "packages/sidecar", name: "@open-design/sidecar" },
+  { directory: "packages/platform", name: "@open-design/platform" },
+  { directory: "packages/download", name: "@open-design/download" },
+  { directory: "packages/host", name: "@open-design/host" },
+  { directory: "packages/agui-adapter", name: "@open-design/agui-adapter" },
+  { directory: "packages/plugin-runtime", name: "@open-design/plugin-runtime" },
+  { directory: "packages/diagnostics", name: "@open-design/diagnostics" },
+  { directory: "apps/daemon", name: "@open-design/daemon" },
+] as const;
+
+export type CodexProductionRuntimeArtifact = {
+  digest: string;
+  entryPath: "runtime.mjs";
+  mediaType: typeof CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1;
+  path: string;
+  size: number;
+};
+
+function run(command: string, args: readonly string[], options: {
+  cwd: string;
+  env?: NodeJS.ProcessEnv;
+}): Promise<void> {
+  return new Promise<void>((resolveRun, rejectRun) => {
+    const child = spawn(command, [...args], {
+      cwd: options.cwd,
+      env: options.env ?? process.env,
+      stdio: "inherit",
+      windowsHide: true,
+    });
+    child.once("error", rejectRun);
+    child.once("close", (code, signal) => {
+      if (code === 0 && signal == null) {
+        resolveRun();
+        return;
+      }
+      rejectRun(new Error(
+        `${command} failed with ${signal == null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`}`,
+      ));
+    });
+  });
+}
+
+async function packWorkspaceTarballs(
+  workspaceRoot: string,
+  tarballsRoot: string,
+): Promise<Record<string, string>> {
+  await rm(tarballsRoot, { force: true, recursive: true });
+  await mkdir(tarballsRoot, { recursive: true });
+  const packed: Record<string, string> = {};
+
+  for (const packageInfo of RUNTIME_INTERNAL_PACKAGES) {
+    const before = new Set(await readdir(tarballsRoot));
+    const invocation = createPackageManagerInvocation(
+      [
+        "-C",
+        packageInfo.directory,
+        "pack",
+        "--pack-destination",
+        tarballsRoot,
+      ],
+      process.env,
+    );
+    await run(invocation.command, invocation.args, {
+      cwd: workspaceRoot,
+      env: process.env,
+    });
+    const after = await readdir(tarballsRoot);
+    const created = after.filter((entry) => !before.has(entry));
+    if (created.length !== 1 || created[0] == null) {
+      throw new Error(
+        `expected one Codex runtime tarball for ${packageInfo.name}; got ${created.length}`,
+      );
+    }
+    packed[packageInfo.name] = join(tarballsRoot, created[0]);
+  }
+
+  return packed;
+}
+
+export function codexProductionRuntimeSource(): string {
+  return `import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { appendFile, mkdir, rename, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const env = ${JSON.stringify(CODEX_PLUGIN_RUNTIME_ENV)};
+const runtimeRoot = dirname(fileURLToPath(import.meta.url));
+const projectRoot = join(runtimeRoot, "node_modules");
+const daemonCli = join(projectRoot, "@open-design", "daemon", "dist", "cli.js");
+const resourceRoot = join(projectRoot, "open-design");
+const logsRoot = process.env[env.LOGS_ROOT];
+const logPath = join(logsRoot, "runtime", "latest.log");
+const identity = {
+  channel: process.env[env.CHANNEL],
+  namespace: process.env[env.NAMESPACE],
+  protocolVersion: Number(process.env[env.PROTOCOL_VERSION]),
+  runtimeDigest: process.env[env.RUNTIME_DIGEST],
+  runtimeVersion: process.env[env.RUNTIME_VERSION],
+};
+
+await mkdir(dirname(logPath), { recursive: true });
+await writeFile(logPath, "", "utf8");
+const daemon = spawn(process.execPath, [
+  daemonCli,
+  "daemon",
+  "start",
+  "--headless",
+  "--port",
+  "0",
+], {
+  cwd: projectRoot,
+  env: {
+    ...process.env,
+    OD_BIN: daemonCli,
+    OD_DAEMON_CLI_PATH: daemonCli,
+    OD_DATA_DIR: process.env[env.DATA_ROOT],
+    OD_NODE_BIN: process.execPath,
+    OD_RESOURCE_ROOT: resourceRoot,
+  },
+  stdio: ["ignore", "pipe", "pipe"],
+  windowsHide: true,
+});
+
+let daemonOutput = "";
+let daemonUrl;
+const appendLog = (chunk) => {
+  const text = String(chunk);
+  daemonOutput += text;
+  void appendFile(logPath, text, "utf8");
+  const match = daemonOutput.match(/\\[od\\] listening on (http:\\/\\/[^\\s]+) \\(headless\\)/u);
+  if (match) daemonUrl = match[1];
+};
+daemon.stdout.on("data", appendLog);
+daemon.stderr.on("data", appendLog);
+
+const deadline = Date.now() + 90_000;
+while (daemonUrl == null && Date.now() < deadline) {
+  if (daemon.exitCode != null) {
+    throw new Error("Open Design daemon exited before reporting readiness");
+  }
+  await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+}
+if (daemonUrl == null) {
+  daemon.kill("SIGTERM");
+  throw new Error("Open Design daemon did not report its URL within 90s");
+}
+const health = await fetch(daemonUrl + "/api/ready", {
+  signal: AbortSignal.timeout(5_000),
+});
+if (!health.ok) {
+  daemon.kill("SIGTERM");
+  throw new Error("Open Design daemon readiness returned HTTP " + health.status);
+}
+await appendFile(logPath, "[codex-plugin-runtime] ready daemon=" + daemonUrl + "\\n", "utf8");
+
+const identityServer = createServer((_request, response) => {
+  response.statusCode = 200;
+  response.setHeader("content-type", "application/json; charset=utf-8");
+  response.end(JSON.stringify(identity) + "\\n");
+});
+await new Promise((resolveListen, rejectListen) => {
+  identityServer.once("error", rejectListen);
+  identityServer.listen(0, "127.0.0.1", () => {
+    identityServer.off("error", rejectListen);
+    resolveListen();
+  });
+});
+const address = identityServer.address();
+if (address == null || typeof address === "string") {
+  daemon.kill("SIGTERM");
+  throw new Error("Codex runtime identity server did not bind to TCP");
+}
+
+const readyPath = process.env[env.READY_PATH];
+const temporaryPath = readyPath + "." + process.pid + ".tmp";
+const ready = {
+  endpointUrl: "http://127.0.0.1:" + address.port + "/status",
+  handoffId: process.env[env.HANDOFF_ID],
+  pid: process.pid,
+  resumeTokenDigest: "sha256:" + createHash("sha256")
+    .update(process.env[env.HANDOFF_TOKEN])
+    .digest("hex"),
+  schemaVersion: 1,
+};
+await writeFile(temporaryPath, JSON.stringify(ready), { mode: 0o600 });
+await rename(temporaryPath, readyPath);
+
+let stopping = false;
+const shutdown = () => {
+  if (stopping) return;
+  stopping = true;
+  identityServer.close();
+  daemon.kill("SIGTERM");
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+daemon.once("exit", (code, signal) => {
+  if (!stopping) {
+    void appendFile(
+      logPath,
+      "[codex-plugin-runtime] daemon exited code=" + code + " signal=" + signal + "\\n",
+      "utf8",
+    ).finally(() => process.exit(code ?? 1));
+    return;
+  }
+  process.exit(0);
+});
+`;
+}
+
+export async function buildCodexProductionRuntime(options: {
+  artifactPath: string;
+  runtimeVersion: string;
+  stageRoot: string;
+  workspaceRoot: string;
+}): Promise<CodexProductionRuntimeArtifact> {
+  if (process.platform !== "darwin" || process.arch !== "arm64") {
+    throw new Error(
+      `Codex production runtime is currently gated to darwin-arm64; got ${process.platform}-${process.arch}`,
+    );
+  }
+
+  const appRoot = join(options.stageRoot, "app");
+  const tarballsRoot = join(options.stageRoot, "tarballs");
+  await rm(options.stageRoot, { force: true, recursive: true });
+  await mkdir(appRoot, { recursive: true });
+  const packed = await packWorkspaceTarballs(options.workspaceRoot, tarballsRoot);
+  const dependencies = Object.fromEntries(
+    Object.entries(packed).map(([name, path]) => [
+      name,
+      `file:${relative(appRoot, path)}`,
+    ]),
+  );
+  await writeFile(join(appRoot, "package.json"), `${JSON.stringify({
+    dependencies,
+    description: "Open Design Codex plugin production runtime",
+    name: "open-design-codex-plugin-runtime",
+    private: true,
+    version: options.runtimeVersion,
+  }, null, 2)}\n`, "utf8");
+  await run("npm", ["install", "--omit=dev", "--no-package-lock"], {
+    cwd: appRoot,
+    env: process.env,
+  });
+
+  const resourceRoot = join(appRoot, "node_modules", "open-design");
+  await mkdir(resourceRoot, { recursive: true });
+  await copyBundledResourceTrees({
+    resourceRoot,
+    workspaceRoot: options.workspaceRoot,
+  });
+  const webOut = join(options.workspaceRoot, "apps", "web", "out");
+  const webOutStat = await stat(webOut);
+  if (!webOutStat.isDirectory()) {
+    throw new Error(`Codex production runtime web output is missing: ${webOut}`);
+  }
+  await cp(webOut, join(appRoot, "node_modules", "apps", "web", "out"), {
+    recursive: true,
+  });
+
+  const entryPath = join(appRoot, "runtime.mjs");
+  await writeFile(entryPath, codexProductionRuntimeSource(), {
+    encoding: "utf8",
+    mode: 0o700,
+  });
+  await chmod(entryPath, 0o700);
+  await mkdir(dirname(options.artifactPath), { recursive: true });
+  await rm(options.artifactPath, { force: true });
+  await run("ditto", [
+    "-c",
+    "-k",
+    "--sequesterRsrc",
+    "--rsrc",
+    ".",
+    options.artifactPath,
+  ], { cwd: appRoot });
+  const bytes = await readFile(options.artifactPath);
+  await rm(options.stageRoot, { force: true, recursive: true });
+  return {
+    digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    entryPath: "runtime.mjs",
+    mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1,
+    path: options.artifactPath,
+    size: bytes.byteLength,
+  };
+}

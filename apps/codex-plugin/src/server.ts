@@ -13,6 +13,7 @@ import {
   readDistributionIdentity,
   resolveFixtureReportUrl,
   resolveIdentityFile,
+  currentDistributionIdentity,
 } from "./identity.js";
 import { CodexPluginRuntimeLauncher } from "./launcher.js";
 import {
@@ -133,7 +134,7 @@ async function run(): Promise<void> {
       const result = await runtimeLauncher.ensureRuntime();
       const structuredContent = {
         ...result,
-        identity,
+        identity: currentDistributionIdentity(identity, result.binding),
       };
       return {
         content: [

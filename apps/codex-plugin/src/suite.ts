@@ -45,8 +45,8 @@ export function resolveCodexPluginRuntimeManifestUrl(
   args: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
-  const value = valueAfterArg(args, CODEX_PLUGIN_ARGS.RUNTIME_MANIFEST_URL)
-    ?? env[CODEX_PLUGIN_ENV.RUNTIME_MANIFEST_URL]
+  const value = env[CODEX_PLUGIN_ENV.RUNTIME_MANIFEST_URL]
+    ?? valueAfterArg(args, CODEX_PLUGIN_ARGS.RUNTIME_MANIFEST_URL)
     ?? null;
   if (value == null || value.trim().length === 0) return null;
   let url: URL;

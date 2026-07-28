@@ -17,6 +17,7 @@ import { parseDistributionBuildReport } from "@open-design/distribution-proto";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  codexProductionRuntimeSource,
   codexMarketplaceName,
   packCodexPlugin,
 } from "../src/codex-plugin.js";
@@ -174,6 +175,8 @@ describe("tools-pack codex-plugin", () => {
       "./mcp/server.mjs",
       "--identity-file",
       "./distribution.json",
+      "--runtime-manifest-url",
+      `https://releases.open-design.ai/codex-plugin/beta/smoke/${target}/latest/runtime.json`,
     ]);
     expect(mcpConfig.mcpServers?.["open-design"]?.env_vars).toEqual([
       "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
@@ -275,5 +278,16 @@ describe("tools-pack codex-plugin", () => {
       first.identity.runtimeDigest,
     );
     expect(second.identity.shellDigest).toBe(first.identity.shellDigest);
+  });
+
+  it("renders a production runtime entry that starts the real daemon", () => {
+    const source = codexProductionRuntimeSource();
+    expect(source).toContain("@open-design\", \"daemon\", \"dist\", \"cli.js");
+    expect(source).toContain("\"daemon\",");
+    expect(source).toContain("\"start\",");
+    expect(source).toContain("\"--headless\",");
+    expect(source).toContain("OD_RESOURCE_ROOT");
+    expect(source).toContain("/api/ready");
+    expect(source).not.toContain("packedRuntimeVersion");
   });
 });

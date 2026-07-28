@@ -15,7 +15,9 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   CODEX_PLUGIN_PLATFORM_TARGETS,
   CODEX_PLUGIN_RUNTIME_ENV,
+  CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
   normalizeCodexPluginPlatformTarget,
+  resolveCodexPluginReleasePaths,
   type CodexPluginPlatformTarget,
 } from "@open-design/codex-plugin-proto";
 import {
@@ -34,6 +36,10 @@ import {
 import { createPackageManagerInvocation } from "@open-design/platform";
 
 import { WORKSPACE_ROOT } from "./config.js";
+import {
+  buildCodexProductionRuntime,
+  codexProductionRuntimeSource,
+} from "./codex-runtime.js";
 
 export type CodexPluginBuildOptions = {
   carrierPath?: string;
@@ -43,6 +49,7 @@ export type CodexPluginBuildOptions = {
   platform?: string;
   protocolVersion?: string | number;
   runtimeDigest?: string;
+  runtimeMode?: string;
   runtimeVersion?: string;
   shellVersion?: string;
   skipAppBuild?: boolean;
@@ -52,6 +59,7 @@ export type CodexPluginBuildOptions = {
 const DEFAULT_NAMESPACE = "codex-local";
 const DEFAULT_PROTOCOL_VERSION = 1;
 const RUNTIME_ENTRY_PATH = "runtime.mjs";
+const RUNTIME_ARCHIVE_PATH = "runtime.zip";
 const MCP_STARTUP_TIMEOUT_SECONDS = 10;
 const MCP_TOOL_TIMEOUT_SECONDS = 120;
 
@@ -64,35 +72,54 @@ function parsePositiveInteger(value: string | number | undefined, label: string)
   return parsed;
 }
 
-async function runAppBuild(workspaceRoot: string): Promise<void> {
+async function runWorkspaceBuild(
+  workspaceRoot: string,
+  packageName: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const invocation = createPackageManagerInvocation(
+    ["--filter", packageName, "build"],
+    env,
+  );
+  await new Promise<void>((resolveRun, rejectRun) => {
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: workspaceRoot,
+      env,
+      stdio: "inherit",
+      windowsHide: true,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+    });
+    child.once("error", rejectRun);
+    child.once("close", (code, signal) => {
+      if (code === 0 && signal == null) {
+        resolveRun();
+        return;
+      }
+      rejectRun(new Error(
+        `${packageName} build failed with ${signal == null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`}`,
+      ));
+    });
+  });
+}
+
+async function runAppBuild(
+  workspaceRoot: string,
+  runtimeMode: CodexPluginRuntimeMode,
+): Promise<void> {
+  if (runtimeMode === "production") {
+    await runWorkspaceBuild(workspaceRoot, "@open-design/daemon...");
+    await runWorkspaceBuild(workspaceRoot, "@open-design/web...", {
+      ...process.env,
+      NODE_ENV: "production",
+      OD_WEB_OUTPUT_MODE: "",
+    });
+  }
   for (const packageName of [
     "@open-design/distribution-proto",
     "@open-design/codex-plugin-proto",
     "@open-design/codex-plugin",
   ]) {
-    const invocation = createPackageManagerInvocation(
-      ["--filter", packageName, "build"],
-      process.env,
-    );
-    await new Promise<void>((resolveRun, rejectRun) => {
-      const child = spawn(invocation.command, invocation.args, {
-        cwd: workspaceRoot,
-        env: process.env,
-        stdio: "inherit",
-        windowsHide: true,
-        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-      });
-      child.once("error", rejectRun);
-      child.once("close", (code, signal) => {
-        if (code === 0 && signal == null) {
-          resolveRun();
-          return;
-        }
-        rejectRun(new Error(
-          `${packageName} build failed with ${signal == null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`}`,
-        ));
-      });
-    });
+    await runWorkspaceBuild(workspaceRoot, packageName);
   }
 }
 
@@ -273,6 +300,7 @@ export function codexMarketplaceName(
 
 function codexPluginMcpConfig(
   target: CodexPluginPlatformTarget,
+  releaseManifestUrl: string,
 ): Record<string, unknown> {
   return {
     mcpServers: {
@@ -281,6 +309,8 @@ function codexPluginMcpConfig(
           "./mcp/server.mjs",
           "--identity-file",
           "./distribution.json",
+          "--runtime-manifest-url",
+          releaseManifestUrl,
         ],
         command: `./${platformCarrierEntryPath(target)}`,
         cwd: ".",
@@ -297,6 +327,14 @@ function codexPluginMcpConfig(
       },
     },
   };
+}
+
+type CodexPluginRuntimeMode = "fixture" | "production";
+
+function resolveRuntimeMode(value: string | undefined): CodexPluginRuntimeMode {
+  if (value == null || value.length === 0 || value === "fixture") return "fixture";
+  if (value === "production") return value;
+  throw new Error("Codex plugin runtime mode must be fixture or production");
 }
 
 export function codexRuntimeFixtureSource(runtimeVersion: string): string {
@@ -383,6 +421,7 @@ export async function packCodexPlugin(
     "protocol version",
   );
   const platform = resolvePlatformTarget(options.platform);
+  const runtimeMode = resolveRuntimeMode(options.runtimeMode);
   const toolRoot = resolve(options.dir ?? join(workspaceRoot, ".tmp", "tools-pack"));
   const namespaceRoot = join(
     toolRoot,
@@ -394,25 +433,52 @@ export async function packCodexPlugin(
   );
   const artifactRoot = join(namespaceRoot, "marketplace");
   const runtimeRoot = join(namespaceRoot, "runtime");
-  const runtimeArtifactPath = join(runtimeRoot, RUNTIME_ENTRY_PATH);
+  const runtimeArtifactPath = join(
+    runtimeRoot,
+    runtimeMode === "production" ? RUNTIME_ARCHIVE_PATH : RUNTIME_ENTRY_PATH,
+  );
   const shellRoot = join(artifactRoot, "plugins", "open-design");
   const manifestPath = join(shellRoot, ".codex-plugin", "plugin.json");
   const buildReportPath = join(namespaceRoot, "build-report.json");
   const marketplaceName = codexMarketplaceName(namespace, platform);
   assertWithinRoot(toolRoot, namespaceRoot, "Codex plugin namespace root");
 
-  if (options.skipAppBuild !== true) await runAppBuild(workspaceRoot);
+  if (options.skipAppBuild !== true) await runAppBuild(workspaceRoot, runtimeMode);
   const builtServerStat = await stat(builtServerPath);
   if (!builtServerStat.isFile() || builtServerStat.size === 0) {
     throw new Error(`Codex plugin MCP bundle is missing or empty: ${builtServerPath}`);
   }
 
   await rm(namespaceRoot, { force: true, recursive: true });
-  const runtimeBytes = Buffer.from(
-    codexRuntimeFixtureSource(runtimeVersion),
-    "utf8",
-  );
-  const runtimeDigest = digestBytes(runtimeBytes);
+  let runtimeDigest: string;
+  let runtimeSize: number;
+  let runtimeEntryPath: string;
+  let runtimeMediaType:
+    | typeof CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1
+    | typeof CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1;
+  if (runtimeMode === "production") {
+    const runtimeArtifact = await buildCodexProductionRuntime({
+      artifactPath: runtimeArtifactPath,
+      runtimeVersion,
+      stageRoot: join(namespaceRoot, "runtime-stage"),
+      workspaceRoot,
+    });
+    runtimeDigest = runtimeArtifact.digest;
+    runtimeSize = runtimeArtifact.size;
+    runtimeEntryPath = runtimeArtifact.entryPath;
+    runtimeMediaType = runtimeArtifact.mediaType;
+  } else {
+    const runtimeBytes = Buffer.from(
+      codexRuntimeFixtureSource(runtimeVersion),
+      "utf8",
+    );
+    runtimeDigest = digestBytes(runtimeBytes);
+    runtimeSize = runtimeBytes.byteLength;
+    runtimeEntryPath = RUNTIME_ENTRY_PATH;
+    runtimeMediaType = CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1;
+    await mkdir(runtimeRoot, { recursive: true });
+    await writeFile(runtimeArtifactPath, runtimeBytes, { mode: 0o700 });
+  }
   if (options.runtimeDigest != null && options.runtimeDigest.length > 0) {
     const expectedRuntimeDigest = normalizeDistributionDigest(
       options.runtimeDigest,
@@ -424,8 +490,6 @@ export async function packCodexPlugin(
       );
     }
   }
-  await mkdir(runtimeRoot, { recursive: true });
-  await writeFile(runtimeArtifactPath, runtimeBytes, { mode: 0o700 });
   await mkdir(shellRoot, { recursive: true });
   await cp(sourceShellRoot, shellRoot, { recursive: true });
   await rm(join(shellRoot, "bootstrap.sh"), { force: true });
@@ -436,7 +500,20 @@ export async function packCodexPlugin(
     shellRoot,
     target: platform,
   });
-  await writeJson(join(shellRoot, ".mcp.json"), codexPluginMcpConfig(platform));
+  const releasePaths = resolveCodexPluginReleasePaths({
+    channel,
+    mediaType: runtimeMediaType,
+    namespace,
+    platform,
+    runtimeVersion,
+  });
+  await writeJson(
+    join(shellRoot, ".mcp.json"),
+    codexPluginMcpConfig(
+      platform,
+      `https://releases.open-design.ai/${releasePaths.latestRuntimeManifestPath}`,
+    ),
+  );
 
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
   manifest.version = shellVersion;
@@ -497,12 +574,14 @@ export async function packCodexPlugin(
     },
     runtimeArtifact: {
       digest: runtimeDigest,
-      entryPath: RUNTIME_ENTRY_PATH,
+      entryPath: runtimeEntryPath,
       path: runtimeArtifactPath,
-      size: runtimeBytes.byteLength,
+      size: runtimeSize,
     },
     schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
   });
   await writeJson(buildReportPath, report);
   return report;
 }
+
+export { codexProductionRuntimeSource };

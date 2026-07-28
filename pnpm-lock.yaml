@@ -939,6 +939,12 @@ importers:
 
   tools/release:
     dependencies:
+      '@open-design/codex-plugin-proto':
+        specifier: workspace:*
+        version: link:../../packages/codex-plugin-proto
+      '@open-design/distribution-proto':
+        specifier: workspace:*
+        version: link:../../packages/distribution-proto
       '@open-design/launcher-proto':
         specifier: workspace:*
         version: link:../../packages/launcher-proto

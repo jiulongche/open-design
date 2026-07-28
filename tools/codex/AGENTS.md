@@ -132,13 +132,19 @@ The report path includes the platform:
 .tmp/tools-pack/out/codex-plugin/namespaces/<namespace>/<platform>/build-report.json
 ```
 
-Start the runtime fixture and retain `runtimeManifestUrl`:
+Start the runtime fixture and retain `runtimeManifestUrl`. To exercise one
+explicit N to N+1 transition from another process, pre-bind the next report and
+retain the unguessable `promotionUrl`:
 
 ```bash
 pnpm tools-serve start codex-plugin \
   --build-report <build-report> \
+  --promotion-build-report <next-build-report> \
   --json
 ```
+
+`POST <promotionUrl>` validates the entire next report before atomically
+switching `latest`; callers cannot supply an arbitrary path over HTTP.
 
 After initializing the acceptance environment and preparing the matching
 plugin below, probe the installed shell entry and external runtime handoff:
@@ -156,6 +162,13 @@ pnpm tools-codex handoff \
 Repeated handoff should attach to the confirmed compatible binding. A live
 incompatible or unobservable owner fails closed. Successful handoff records
 the verified runtime binding against the prepared plugin identity.
+
+For an update rehearsal, keep the original shell prepared, promote the feed,
+confirm the live-incompatible quick fail, stop only the exact recorded runtime
+PID, then repeat `handoff` with the original build report. The returned current
+identity must retain the shell digest/version while advancing the runtime
+digest/version. Do not prepare the N+1 report: that would test a shell reinstall
+instead of runtime self-update.
 
 ## Desktop acceptance
 

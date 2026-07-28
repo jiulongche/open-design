@@ -14,6 +14,7 @@ import {
   WINDOWS_CODEX_PLUGIN_COMMAND_MAX_PATH_LENGTH,
   assertCodexPluginCacheCommandPathSupported,
   classifyToolCodexAcceptance,
+  currentIdentityFromStdioObservation,
   inspectToolCodexDesktopScreenshot,
   parseToolCodexDesktopUiObservation,
   verifyToolCodexArtifact,
@@ -78,6 +79,34 @@ const SIGNALS: ToolCodexAcceptanceSignals = {
 };
 
 describe("tools-codex acceptance", () => {
+  it("uses the selected runtime identity without changing shell fields", () => {
+    const fallback = {
+      channel: "beta",
+      namespace: "release-beta",
+      protocolVersion: 1,
+      runtimeDigest: `sha256:${"a".repeat(64)}`,
+      runtimeVersion: "0.16.2-beta.1",
+      shellDigest: `sha256:${"b".repeat(64)}`,
+      shellType: "codex-plugin",
+      shellVersion: "0.1.0",
+    } as const;
+
+    expect(currentIdentityFromStdioObservation({
+      runtime: {
+        identity: {
+          ...fallback,
+          runtimeDigest: `sha256:${"c".repeat(64)}`,
+          runtimeVersion: "0.16.2-beta.2",
+        },
+      },
+    }, fallback)).toMatchObject({
+      runtimeDigest: `sha256:${"c".repeat(64)}`,
+      runtimeVersion: "0.16.2-beta.2",
+      shellDigest: fallback.shellDigest,
+      shellVersion: fallback.shellVersion,
+    });
+  });
+
   it("fails before install when the Windows plugin carrier path exceeds MAX_PATH", () => {
     expect(assertCodexPluginCacheCommandPathSupported({
       codexHome: "C:\\od",

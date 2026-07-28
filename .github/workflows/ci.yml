@@ -314,8 +314,10 @@ jobs:
           pnpm --filter @open-design/platform test
           pnpm --filter @open-design/sidecar test
           pnpm --filter @open-design/sidecar-proto test
+          pnpm --filter @open-design/codex-plugin-proto test
           pnpm --filter @open-design/codex-plugin test
           pnpm --filter @open-design/tools-codex test
+          pnpm --filter @open-design/tools-release test
           pnpm --filter @open-design/tools-serve test
           if [ "${{ needs.scopes.outputs.tools_dev_tests_required }}" = "true" ]; then
             pnpm --filter @open-design/tools-dev test

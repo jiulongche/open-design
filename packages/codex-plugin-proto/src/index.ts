@@ -31,6 +31,7 @@ export const CODEX_PLUGIN_RUNTIME_ENV = Object.freeze({
   DATA_ROOT: "OD_DATA_DIR",
   HANDOFF_ID: "OD_CODEX_PLUGIN_HANDOFF_ID",
   HANDOFF_TOKEN: "OD_CODEX_PLUGIN_HANDOFF_TOKEN",
+  LOGS_ROOT: "OD_CODEX_PLUGIN_LOGS_ROOT",
   NAMESPACE: "OD_DISTRIBUTION_NAMESPACE",
   PROTOCOL_VERSION: "OD_DISTRIBUTION_PROTOCOL_VERSION",
   READY_PATH: "OD_CODEX_PLUGIN_READY_PATH",
@@ -40,6 +41,7 @@ export const CODEX_PLUGIN_RUNTIME_ENV = Object.freeze({
 
 export const CODEX_PLUGIN_RUNTIME_MEDIA_TYPES = Object.freeze({
   NODE_MODULE_V1: "application/vnd.open-design.runtime.node-module-v1",
+  ZIP_V1: "application/vnd.open-design.runtime.zip-v1",
 } as const);
 
 export const CODEX_PLUGIN_PLATFORM_TARGETS = Object.freeze({
@@ -52,6 +54,12 @@ export type CodexPluginPlatformTarget =
 
 export type CodexPluginRuntimeMediaType =
   (typeof CODEX_PLUGIN_RUNTIME_MEDIA_TYPES)[keyof typeof CODEX_PLUGIN_RUNTIME_MEDIA_TYPES];
+
+export type CodexPluginReleasePaths = {
+  latestRuntimeManifestPath: string;
+  root: string;
+  runtimeArtifactPath: string;
+};
 
 export const CODEX_PLUGIN_HANDOFF_STATES = Object.freeze({
   ACQUIRED: "acquired",
@@ -256,7 +264,12 @@ function normalizeRuntimeUrl(value: unknown, label: string): string {
 }
 
 function normalizeRuntimeMediaType(value: unknown): CodexPluginRuntimeMediaType {
-  if (value === CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1) return value;
+  if (
+    value === CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1
+    || value === CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1
+  ) {
+    return value;
+  }
   throw new CodexPluginProtocolError(
     `unsupported Codex plugin runtime media type: ${String(value)}`,
   );
@@ -274,6 +287,34 @@ export function normalizeCodexPluginPlatformTarget(
   throw new CodexPluginProtocolError(
     `unsupported Codex plugin platform target: ${String(value)}`,
   );
+}
+
+export function resolveCodexPluginReleasePaths(options: {
+  channel: unknown;
+  mediaType: CodexPluginRuntimeMediaType;
+  namespace: unknown;
+  platform: unknown;
+  runtimeVersion: unknown;
+}): CodexPluginReleasePaths {
+  const channel = normalizeDistributionChannel(options.channel);
+  const namespace = normalizeDistributionNamespace(options.namespace);
+  const platform = normalizeCodexPluginPlatformTarget(options.platform);
+  const runtimeVersion = normalizeDistributionRuntimeVersion(
+    options.runtimeVersion,
+    channel,
+  );
+  const mediaType = normalizeRuntimeMediaType(options.mediaType);
+  const root = `codex-plugin/${channel}/${namespace}/${platform}`;
+  const artifactName =
+    mediaType === CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1
+      ? "runtime.zip"
+      : "runtime.mjs";
+  return {
+    latestRuntimeManifestPath: `${root}/latest/runtime.json`,
+    root,
+    runtimeArtifactPath:
+      `${root}/versions/${runtimeVersion}/runtime/${artifactName}`,
+  };
 }
 
 function normalizeHandoffState(value: unknown): CodexPluginHandoffState {

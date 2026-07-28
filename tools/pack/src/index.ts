@@ -125,8 +125,10 @@ cli
   .option("--platform <target>", "host-native plugin target: darwin-arm64|win32-x64")
   .option("--protocol-version <version>", "OD runtime protocol version")
   .option("--runtime-digest <digest>", "OD runtime sha256 digest")
+  .option("--runtime-mode <mode>", "runtime payload: fixture|production (default: fixture)")
   .option("--runtime-version <version>", "OD runtime version")
   .option("--shell-version <version>", "Codex plugin shell version")
+  .option("--skip-app-build", "Reuse already built workspace outputs")
   .action(async (action: string, options: CodexPluginBuildOptions) => {
     if (action !== "build") throw new Error(`unsupported codex-plugin action: ${action}`);
     printJson(await packCodexPlugin(options));

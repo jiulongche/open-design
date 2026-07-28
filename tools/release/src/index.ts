@@ -51,6 +51,12 @@ cli
   });
 
 cli
+  .command("publish-codex-plugin", "Publish one platform-native Codex plugin runtime")
+  .action(async () => {
+    await import("./codex-plugin/publish.ts");
+  });
+
+cli
   .command("prepare-release-note", "Discover and validate release note sources")
   .action(async () => {
     await import("./release-note/prepare.ts");

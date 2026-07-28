@@ -25,6 +25,7 @@ import {
   assertSameDistributionRuntimeIdentity,
   calculateDistributionArtifactInventory,
   distributionIdentityKey,
+  normalizeDistributionIdentity,
   normalizeDistributionInventoryPath,
   parseDistributionBuildReport,
   parseDistributionRuntimeBinding,
@@ -753,11 +754,23 @@ async function probeStdio(
     const selectedManifest = parseCodexPluginAcquisitionManifest(
       (runtime.structuredContent as { manifest: unknown }).manifest,
     );
+    const selectedBinding = parseDistributionRuntimeBinding(
+      (runtime.structuredContent as { binding: unknown }).binding,
+    );
     assertSameDistributionRuntimeIdentity(
       selectedManifest,
-      parseDistributionRuntimeBinding(
-        (runtime.structuredContent as { binding: unknown }).binding,
-      ),
+      selectedBinding,
+    );
+    if (!("identity" in runtime.structuredContent)) {
+      throw new Error("Codex plugin runtime handoff did not return a current identity");
+    }
+    assertSameDistributionIdentity(
+      {
+        ...buildReport.identity,
+        runtimeDigest: selectedBinding.runtimeDigest,
+        runtimeVersion: selectedBinding.runtimeVersion,
+      },
+      (runtime.structuredContent as { identity: DistributionIdentityV1 }).identity,
     );
     return { runtime: runtime.structuredContent, status };
   } finally {
@@ -770,6 +783,23 @@ export type ToolCodexHandoffReport = {
   identity: DistributionIdentityV1;
   observation: unknown;
 };
+
+export function currentIdentityFromStdioObservation(
+  observation: unknown,
+  fallback: DistributionIdentityV1,
+): DistributionIdentityV1 {
+  if (
+    observation != null
+    && typeof observation === "object"
+    && "runtime" in observation
+    && observation.runtime != null
+    && typeof observation.runtime === "object"
+    && "identity" in observation.runtime
+  ) {
+    return normalizeDistributionIdentity(observation.runtime.identity);
+  }
+  return normalizeDistributionIdentity(fallback);
+}
 
 export async function runToolCodexHandoffProbe(options: {
   buildReportPath: string;
@@ -1186,6 +1216,18 @@ async function recordToolCodexDesktopUiObservationUnlocked(
     );
   }
   const screenshot = await inspectToolCodexDesktopScreenshot(screenshotPath, "");
+  const sentinel = await readToolCodexSentinel(options.paths);
+  const runtimeBinding = runtimeBindingFromPreparedState(sentinel.prepared);
+  const observedIdentity = options.tool === "ensure_open_design_runtime"
+    ? currentIdentityFromStdioObservation(
+        await probeStdio(
+          buildReport,
+          sentinel.prepared?.runtime?.fixtureReportUrl ?? undefined,
+          runtimeBinding,
+        ),
+        buildReport.identity,
+      )
+    : buildReport.identity;
   const outputPath = resolveToolCodexReportPath(
     options.paths,
     options.outputPath ?? options.paths.desktopUiObservationPath,
@@ -1209,7 +1251,7 @@ async function recordToolCodexDesktopUiObservationUnlocked(
     },
     server: "open-design",
     structuredContent: {
-      identity: buildReport.identity,
+      identity: observedIdentity,
     },
     tool: options.tool,
   };
@@ -1292,11 +1334,15 @@ export async function runToolCodexAcceptance(options: {
   const expectedTool = runtimeBinding == null
     ? "get_open_design_status"
     : "ensure_open_design_runtime";
+  const expectedIdentity = currentIdentityFromStdioObservation(
+    stdioStatus,
+    buildReport.identity,
+  );
   const evidence = {
     desktopUiObserved: await evaluateDesktopUiObservation(
       desktopUiObservation,
       desktopUiObservationPath,
-      buildReport.identity,
+      expectedIdentity,
       host,
       expectedTool,
     ),
@@ -1339,7 +1385,7 @@ export async function runToolCodexAcceptance(options: {
     buildReportPath,
     evidence,
     generatedAt: new Date().toISOString(),
-    identity: buildReport.identity,
+    identity: expectedIdentity,
     marketplaceRoot: buildReport.paths.artifactRoot,
     observations: {
       cliVersion: host.cli.version,

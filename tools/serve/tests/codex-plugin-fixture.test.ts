@@ -34,8 +34,10 @@ async function writeBuildReport(options: {
   runtimeVersion?: string;
 } = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "open-design-codex-plugin-serve-"));
-  const shellRoot = join(root, "marketplace", "plugins", "open-design");
-  const runtimePath = join(root, "runtime", "runtime.mjs");
+  const platformRoot = join(root, "darwin-arm64");
+  const artifactRoot = join(platformRoot, "marketplace");
+  const shellRoot = join(artifactRoot, "plugins", "open-design");
+  const runtimePath = join(platformRoot, "runtime", "runtime.mjs");
   const runtimeBytes = options.runtimeBytes ?? RUNTIME_BYTES;
   const runtimeDigest =
     `sha256:${createHash("sha256").update(runtimeBytes).digest("hex")}`;
@@ -45,7 +47,7 @@ async function writeBuildReport(options: {
     runtimeVersion: options.runtimeVersion ?? IDENTITY.runtimeVersion,
   };
   await mkdir(join(shellRoot, ".codex-plugin"), { recursive: true });
-  await mkdir(join(root, "runtime"), { recursive: true });
+  await mkdir(join(platformRoot, "runtime"), { recursive: true });
   await writeFile(runtimePath, runtimeBytes);
   const path = join(root, "build-report.json");
   await writeFile(path, JSON.stringify({
@@ -56,7 +58,7 @@ async function writeBuildReport(options: {
     },
     identity,
     paths: {
-      artifactRoot: join(root, "marketplace"),
+      artifactRoot,
       manifestPath: join(shellRoot, ".codex-plugin", "plugin.json"),
       shellRoot,
     },
@@ -172,6 +174,42 @@ describe("Codex plugin fixture", () => {
       expect(parseCodexPluginAcquisitionManifest(
         await (await fetch(manifestUrl)).json(),
       ).control.codexPlugin.version.min).toBe("0.2.0");
+
+      await expect(server.promote({
+        buildReportPath: await writeBuildReport({
+          runtimeBytes: Buffer.from("export const fixture = 0;\n"),
+          runtimeVersion: "0.16.2-beta.2",
+        }),
+      })).rejects.toThrow("would move latest backward");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("exposes an unguessable configured promotion endpoint for CLI acceptance", async () => {
+    const promotedBytes = Buffer.from("export const promoted = true;\n");
+    const server = await startCodexPluginFixtureServer({
+      buildReportPath: await writeBuildReport({
+        runtimeVersion: "0.16.1-beta.1",
+      }),
+      promotionBuildReportPath: await writeBuildReport({
+        runtimeBytes: promotedBytes,
+        runtimeVersion: "0.16.2-beta.1",
+      }),
+    });
+    try {
+      expect(server.promotionUrl).toMatch(
+        /^http:\/\/127\.0\.0\.1:\d+\/__tools-serve\/codex-plugin\/promote\/[a-f0-9]{32}$/u,
+      );
+      const response = await fetch(server.promotionUrl!, { method: "POST" });
+      expect(response.status).toBe(200);
+      expect(server.info.identity.runtimeVersion).toBe("0.16.2-beta.1");
+      const manifest = parseCodexPluginAcquisitionManifest(
+        await (await fetch(server.info.runtimeManifestUrl)).json(),
+      );
+      expect(Buffer.from(
+        await (await fetch(manifest.artifact.url)).arrayBuffer(),
+      )).toEqual(promotedBytes);
     } finally {
       await server.close();
     }

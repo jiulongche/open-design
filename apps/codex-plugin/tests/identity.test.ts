@@ -8,6 +8,7 @@ import { CODEX_PLUGIN_ENV } from "@open-design/codex-plugin-proto";
 
 import {
   FIXTURE_REPORT_URL_ENV,
+  currentDistributionIdentity,
   observeFixture,
   readDistributionIdentity,
   resolveFixtureReportUrl,
@@ -46,6 +47,20 @@ describe("codex plugin identity", () => {
     const identityPath = join(root, "distribution.json");
     await writeFile(identityPath, JSON.stringify(IDENTITY));
     expect(await readDistributionIdentity(identityPath)).toEqual(IDENTITY);
+  });
+
+  it("combines the immutable shell identity with the selected runtime", () => {
+    expect(currentDistributionIdentity(IDENTITY, {
+      channel: IDENTITY.channel,
+      namespace: IDENTITY.namespace,
+      protocolVersion: IDENTITY.protocolVersion,
+      runtimeDigest: `sha256:${"c".repeat(64)}`,
+      runtimeVersion: "0.16.2-beta.1",
+    })).toEqual({
+      ...IDENTITY,
+      runtimeDigest: `sha256:${"c".repeat(64)}`,
+      runtimeVersion: "0.16.2-beta.1",
+    });
   });
 
   it("prefers the explicit fixture report URL over the environment", () => {
@@ -131,14 +146,14 @@ describe("codex plugin identity", () => {
     });
   });
 
-  it("accepts only explicit secure or loopback runtime manifests", () => {
+  it("lets a controlled local environment override the baked release manifest", () => {
     expect(resolveCodexPluginRuntimeManifestUrl(
       ["--runtime-manifest-url", "http://127.0.0.1:17456/manifest.json"],
       {
         [CODEX_PLUGIN_ENV.RUNTIME_MANIFEST_URL]:
           "https://updates.example.com/runtime.json",
       },
-    )).toBe("http://127.0.0.1:17456/manifest.json");
+    )).toBe("https://updates.example.com/runtime.json");
     expect(() => resolveCodexPluginRuntimeManifestUrl(
       ["--runtime-manifest-url", "http://example.com/runtime.json"],
       {},
