@@ -66,6 +66,39 @@ describe("tools-codex automated invocation evidence", () => {
     });
   });
 
+  it("accepts the static runtime handoff tool when selected", () => {
+    expect(parseCodexExecJsonl(jsonl(
+      {
+        item: {
+          error: null,
+          result: {
+            structured_content: {
+              binding: {
+                channel: IDENTITY.channel,
+                namespace: IDENTITY.namespace,
+                protocolVersion: IDENTITY.protocolVersion,
+                runtimeDigest: IDENTITY.runtimeDigest,
+                runtimeVersion: IDENTITY.runtimeVersion,
+              },
+              identity: IDENTITY,
+            },
+          },
+          server: "open-design",
+          status: "completed",
+          tool: "ensure_open_design_runtime",
+          type: "mcp_tool_call",
+        },
+        type: "item.completed",
+      },
+      { type: "turn.completed" },
+    ), IDENTITY, "ensure_open_design_runtime")).toMatchObject({
+      identityMatches: true,
+      status: "PASS",
+      targetTool: "ensure_open_design_runtime",
+      toolCallCount: 1,
+    });
+  });
+
   it("does not retry identity mismatch or duplicate target calls", () => {
     const wrongIdentity = {
       ...IDENTITY,
@@ -138,7 +171,8 @@ describe("tools-codex automated invocation evidence", () => {
       generatedAt: "2026-07-27T12:00:00.000Z",
       identity: IDENTITY,
       provenance: {
-        approvalPolicy: "never",
+        approvalPolicy: "on-request",
+        approvalsReviewer: "auto_review",
         desktopRootPid: 10,
         desktopRootStartedAt: "Mon Jul 27 12:00:00 2026",
         desktopRunId: "run-123",
@@ -149,7 +183,7 @@ describe("tools-codex automated invocation evidence", () => {
         workspace: "/managed/workspace",
       },
       reasonCode: null,
-      schemaVersion: 1,
+      schemaVersion: 2,
       status: "PASS",
       successfulAttempt: 1,
     })).toThrowError(expect.objectContaining({

@@ -9,7 +9,12 @@
         "--identity-file",
         "./distribution.json"
       ],
-      "cwd": "."
+      "cwd": ".",
+      "env_vars": [
+        "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
+        "OD_DATA_DIR",
+        "OD_DISTRIBUTION_CHANNEL_ROOT"
+      ]
     }
   }
 }

@@ -23,6 +23,7 @@ This file is the single source of truth for agents entering this repository. Rea
 - `apps/desktop` is the Electron shell; it discovers the web URL through sidecar IPC.
 - `apps/packaged` is the thin packaged Electron runtime entry; it starts packaged sidecars and owns the `od://` entry glue only.
 - `apps/codex-plugin` is the Codex host shell source; it owns the Codex manifest/skills and stdio MCP bootstrap while sharing packaged/desktop's neutral Open Design channel, namespace, path, runtime-store, and daemon-data substrate.
+- `packages/distribution-proto` owns that shell-neutral suite substrate, including shared runtime-store pointers, bindings, and leases. `packages/codex-plugin-proto` layers only Codex bootstrap argv/env, acquisition manifests, handoff descriptors, and ready-message validation on top.
 - `apps/landing-page` is the standalone static Astro marketing and public catalog site. It reads repository content at build time and is not part of the daemon/web product runtime.
 - `packages/contracts` is the pure TypeScript web/daemon app contract layer.
 - `packages/sidecar-proto` owns the Open Design sidecar business protocol; `packages/sidecar` owns the generic sidecar runtime; `packages/platform` owns generic OS process primitives.

@@ -12,7 +12,8 @@ under `~/.od/tools-codex/<environment-namespace>`. It prepares a packed
 `apps/codex-plugin` marketplace, starts and stops only a positively owned Codex
 Desktop process tree, captures Desktop host-load evidence, invokes the plugin
 through same-home `codex exec`, combines evidence, and performs exact layered
-cleanup.
+cleanup. It also exposes a host-independent `handoff` probe for the static MCP
+tool → shared runtime acquisition/attach path.
 
 The current Desktop UI lane is intentionally operator-assisted:
 
@@ -51,7 +52,10 @@ Control-plane implementation:
 - `src/desktop-evidence.ts` — current-run Desktop app-server and plugin
   host-load provenance.
 - `src/invocation.ts` — ephemeral same-home `codex exec --json` invocation,
-  target-tool validation, retries, and invocation-owned cleanup.
+  target-tool validation, on-request automatic approval review, retries, and
+  invocation-owned cleanup.
+- `src/runtime.ts` — explicit shared channel-root/runtime-manifest binding and
+  stable environment propagation into Codex CLI/Desktop.
 - `src/clean.ts` — exact `control`, `runs`, `plugin`, `cache`, `credentials`,
   and `home` cleanup layers.
 
@@ -74,13 +78,18 @@ Adjacent owners:
 - `apps/codex-plugin/src/identity.ts` — embedded distribution identity.
 - `apps/codex-plugin/src/suite.ts` — explicit channel-root binding onto the
   shared suite path resolver.
+- `apps/codex-plugin/src/launcher.ts` — shared lease, immutable acquisition,
+  detached ready-file handoff, binding confirmation, and exact attach.
 - `apps/codex-plugin/plugin/open-design/` — Codex manifest, skill, and assets.
+- `packages/codex-plugin-proto/src/index.ts` — Codex-only bootstrap,
+  acquisition, handoff, ready-message, and fixture protocol.
 - `packages/distribution-proto/src/index.ts` — shared channel/namespace suite
-  paths, neutral identity/report, version, digest, and canonical
-  artifact-inventory rules.
-- `tools/pack/src/codex-plugin.ts` — relocatable marketplace and build report.
-- `tools/serve/src/codex-plugin-fixture.ts` — optional identity-bound loopback
-  fixture.
+  paths, runtime store/pointer/binding/lease, neutral identity/report, version,
+  digest, and canonical artifact-inventory rules.
+- `tools/pack/src/codex-plugin.ts` — relocatable marketplace, deterministic
+  runtime probe artifact, and build report.
+- `tools/serve/src/codex-plugin-fixture.ts` — identity-bound loopback fixture,
+  runtime acquisition manifest, and artifact bytes.
 - `docs/testing/codex-plugin-desktop.md` — full operator guide and evidence
   envelope.
 
@@ -103,6 +112,51 @@ Adjacent owners:
 - Keep reports and mismatched build artifacts intact during diagnosis. Do not
   repair identity or evidence JSON by hand.
 - Nix is not part of this control plane's current acceptance gate.
+- Automated handoff invocation must keep the runtime tool marked
+  side-effecting. Use Codex `on-request` approval with `auto_review`; do not
+  relabel acquisition as read-only or use `never`, which correctly rejects the
+  MCP call.
+
+## Hot path: runtime handoff closure
+
+Build the plugin shell plus deterministic local runtime probe. The runtime
+digest is calculated from the emitted bytes; `--runtime-digest` is only an
+optional exact assertion when an external caller already knows it.
+
+```bash
+pnpm tools-pack codex-plugin build \
+  --channel stable \
+  --namespace codex-smoke \
+  --runtime-version 0.16.1 \
+  --protocol-version 1 \
+  --json
+```
+
+Start the loopback fixture in a dedicated terminal and retain its printed
+`runtimeManifestUrl`:
+
+```bash
+pnpm tools-serve start codex-plugin \
+  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke/build-report.json \
+  --json
+```
+
+Probe the packed MCP bootstrap against one explicit absolute shared channel
+root. Repeating the command must attach to the confirmed binding rather than
+download or start a second compatible runtime:
+
+```bash
+pnpm tools-codex handoff \
+  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke/build-report.json \
+  --distribution-channel-root <absolute-shared-channel-root> \
+  --runtime-manifest-url <runtimeManifestUrl> \
+  --fixture-report-url <endpoint-origin>/report \
+  --json
+```
+
+The runtime fixture is detached from the short-lived MCP process and has a
+15-minute idle exit. A dead binding is recovered only while holding the shared
+runtime lease; a live but unobservable or incompatible binding fails closed.
 
 ## Hot path: local distribution and automated evidence
 
@@ -141,6 +195,13 @@ pnpm tools-codex start \
   --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke/build-report.json \
   --json
 ```
+
+For the runtime-handoff lane, append the same
+`--distribution-channel-root <absolute-shared-channel-root>` and
+`--runtime-manifest-url <runtimeManifestUrl>` pair to `start`, `invoke`, and
+`accept`. The pair is all-or-nothing and is propagated through the controlled
+Desktop/CLI environment; it is not persisted into the user's default Codex
+configuration.
 
 While the same controlled run is active, capture the structured invocation:
 
@@ -183,7 +244,17 @@ Perform this checkpoint after `start --build-report` succeeds and before
    Do not infer it from repository files or shell commands.
    ```
 
+   For the runtime-handoff lane, replace the tool instruction with:
+
+   ```text
+   Use the open-design plugin and call ensure_open_design_runtime exactly once.
+   Return the complete structured distribution identity and whether the runtime
+   was acquired or attached. Do not infer it from repository files or shell commands.
+   ```
+
 4. Confirm the visible tool is `open-design/get_open_design_status`.
+   For the handoff lane it must instead be
+   `open-design/ensure_open_design_runtime`.
 5. Confirm the displayed identity matches the current build report's channel,
    namespace, protocol version, runtime version/digest, and shell
    type/version/digest.

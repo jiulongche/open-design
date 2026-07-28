@@ -12,6 +12,9 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
+  CODEX_PLUGIN_RUNTIME_ENV,
+} from "@open-design/codex-plugin-proto";
+import {
   DISTRIBUTION_REPORT_SCHEMA_VERSION,
   DISTRIBUTION_SHELL_TYPES,
   calculateDistributionArtifactInventory,
@@ -42,6 +45,7 @@ export type CodexPluginBuildOptions = {
 
 const DEFAULT_NAMESPACE = "codex-local";
 const DEFAULT_PROTOCOL_VERSION = 1;
+const RUNTIME_ENTRY_PATH = "runtime.mjs";
 
 function parsePositiveInteger(value: string | number | undefined, label: string): number {
   if (value == null || value === "") return DEFAULT_PROTOCOL_VERSION;
@@ -53,29 +57,35 @@ function parsePositiveInteger(value: string | number | undefined, label: string)
 }
 
 async function runAppBuild(workspaceRoot: string): Promise<void> {
-  const invocation = createPackageManagerInvocation(
-    ["--filter", "@open-design/codex-plugin", "build"],
-    process.env,
-  );
-  await new Promise<void>((resolveRun, rejectRun) => {
-    const child = spawn(invocation.command, invocation.args, {
-      cwd: workspaceRoot,
-      env: process.env,
-      stdio: "inherit",
-      windowsHide: true,
-      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+  for (const packageName of [
+    "@open-design/distribution-proto",
+    "@open-design/codex-plugin-proto",
+    "@open-design/codex-plugin",
+  ]) {
+    const invocation = createPackageManagerInvocation(
+      ["--filter", packageName, "build"],
+      process.env,
+    );
+    await new Promise<void>((resolveRun, rejectRun) => {
+      const child = spawn(invocation.command, invocation.args, {
+        cwd: workspaceRoot,
+        env: process.env,
+        stdio: "inherit",
+        windowsHide: true,
+        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      });
+      child.once("error", rejectRun);
+      child.once("close", (code, signal) => {
+        if (code === 0 && signal == null) {
+          resolveRun();
+          return;
+        }
+        rejectRun(new Error(
+          `${packageName} build failed with ${signal == null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`}`,
+        ));
+      });
     });
-    child.once("error", rejectRun);
-    child.once("close", (code, signal) => {
-      if (code === 0 && signal == null) {
-        resolveRun();
-        return;
-      }
-      rejectRun(new Error(
-        `codex plugin app build failed with ${signal == null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`}`,
-      ));
-    });
-  });
+  }
 }
 
 function assertWithinRoot(root: string, target: string, label: string): void {
@@ -114,6 +124,10 @@ async function digestFiles(root: string, files: readonly string[]): Promise<{
   return { digest: inventory.digest, size: inventory.size };
 }
 
+function digestBytes(bytes: Uint8Array): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
 async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
@@ -132,6 +146,58 @@ export function codexMarketplaceName(namespace: string): string {
   return `open-design-${portable}-${suffix}`;
 }
 
+export function codexRuntimeFixtureSource(): string {
+  return `import { createHash } from "node:crypto";
+import { rename, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+
+const env = ${JSON.stringify(CODEX_PLUGIN_RUNTIME_ENV)};
+const identity = {
+  channel: process.env[env.CHANNEL],
+  namespace: process.env[env.NAMESPACE],
+  protocolVersion: Number(process.env[env.PROTOCOL_VERSION]),
+  runtimeDigest: process.env[env.RUNTIME_DIGEST],
+  runtimeVersion: process.env[env.RUNTIME_VERSION],
+};
+const idleMs = 15 * 60 * 1000;
+let idleTimer;
+const shutdown = () => server.close(() => process.exit(0));
+const armIdleTimer = () => {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(shutdown, idleMs);
+  idleTimer.unref();
+};
+const server = createServer((_request, response) => {
+  armIdleTimer();
+  response.statusCode = 200;
+  response.setHeader("content-type", "application/json; charset=utf-8");
+  response.end(JSON.stringify(identity) + "\\n");
+});
+server.listen(0, "127.0.0.1", () => {
+  const address = server.address();
+  if (address == null || typeof address === "string") {
+    process.exit(1);
+  }
+  const readyPath = process.env[env.READY_PATH];
+  const temporaryPath = readyPath + "." + process.pid + ".tmp";
+  const ready = {
+    endpointUrl: \`http://127.0.0.1:\${address.port}/status\`,
+    handoffId: process.env[env.HANDOFF_ID],
+    pid: process.pid,
+    resumeTokenDigest: "sha256:" + createHash("sha256")
+      .update(process.env[env.HANDOFF_TOKEN])
+      .digest("hex"),
+    schemaVersion: 1,
+  };
+  void writeFile(temporaryPath, JSON.stringify(ready), { mode: 0o600 })
+    .then(() => rename(temporaryPath, readyPath));
+  armIdleTimer();
+});
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+`;
+}
+
 export async function packCodexPlugin(
   options: CodexPluginBuildOptions = {},
 ): Promise<DistributionBuildReportV1> {
@@ -145,18 +211,11 @@ export async function packCodexPlugin(
   if (options.runtimeVersion == null || options.runtimeVersion.length === 0) {
     throw new Error("Codex plugin build requires --runtime-version");
   }
-  if (options.runtimeDigest == null || options.runtimeDigest.length === 0) {
-    throw new Error("Codex plugin build requires --runtime-digest");
-  }
   const channel = normalizeDistributionChannel(options.channel);
   const namespace = normalizeDistributionNamespace(options.namespace ?? DEFAULT_NAMESPACE);
   const runtimeVersion = normalizeDistributionRuntimeVersion(
     options.runtimeVersion,
     channel,
-  );
-  const runtimeDigest = normalizeDistributionDigest(
-    options.runtimeDigest,
-    "runtime digest",
   );
   const shellVersion = normalizeDistributionVersion(
     options.shellVersion ?? await readPackageVersion(join(appRoot, "package.json")),
@@ -175,6 +234,8 @@ export async function packCodexPlugin(
     namespace,
   );
   const artifactRoot = join(namespaceRoot, "marketplace");
+  const runtimeRoot = join(namespaceRoot, "runtime");
+  const runtimeArtifactPath = join(runtimeRoot, RUNTIME_ENTRY_PATH);
   const shellRoot = join(artifactRoot, "plugins", "open-design");
   const manifestPath = join(shellRoot, ".codex-plugin", "plugin.json");
   const buildReportPath = join(namespaceRoot, "build-report.json");
@@ -188,6 +249,21 @@ export async function packCodexPlugin(
   }
 
   await rm(namespaceRoot, { force: true, recursive: true });
+  const runtimeBytes = Buffer.from(codexRuntimeFixtureSource(), "utf8");
+  const runtimeDigest = digestBytes(runtimeBytes);
+  if (options.runtimeDigest != null && options.runtimeDigest.length > 0) {
+    const expectedRuntimeDigest = normalizeDistributionDigest(
+      options.runtimeDigest,
+      "runtime digest",
+    );
+    if (expectedRuntimeDigest !== runtimeDigest) {
+      throw new Error(
+        `runtime digest ${expectedRuntimeDigest} does not match generated artifact ${runtimeDigest}`,
+      );
+    }
+  }
+  await mkdir(runtimeRoot, { recursive: true });
+  await writeFile(runtimeArtifactPath, runtimeBytes, { mode: 0o700 });
   await mkdir(shellRoot, { recursive: true });
   await cp(sourceShellRoot, shellRoot, { recursive: true });
   await mkdir(join(shellRoot, "mcp"), { recursive: true });
@@ -249,6 +325,12 @@ export async function packCodexPlugin(
       artifactRoot,
       manifestPath,
       shellRoot,
+    },
+    runtimeArtifact: {
+      digest: runtimeDigest,
+      entryPath: RUNTIME_ENTRY_PATH,
+      path: runtimeArtifactPath,
+      size: runtimeBytes.byteLength,
     },
     schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
   });

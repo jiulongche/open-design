@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DISTRIBUTION_REPORT_SCHEMA_VERSION,
+  DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
   DISTRIBUTION_SHELL_TYPES,
   DISTRIBUTION_SUITE_PATH_ERROR_CODES,
   DistributionProtocolError,
@@ -12,9 +13,16 @@ import {
   calculateDistributionArtifactInventory,
   normalizeDistributionIdentity,
   normalizeDistributionInventoryPath,
+  normalizeDistributionRuntimeIdentity,
   normalizeDistributionVersion,
   parseDistributionBuildReport,
+  parseDistributionRuntimeBinding,
+  parseDistributionRuntimeLease,
+  parseDistributionRuntimePointer,
   parseDistributionServeReport,
+  isDistributionRuntimeLeaseExpired,
+  resolveDistributionRuntimeStorePaths,
+  resolveDistributionRuntimeVersionPaths,
   resolveDistributionSuitePaths,
   type DistributionIdentityV1,
 } from "../src/index.js";
@@ -103,6 +111,126 @@ describe("@open-design/distribution-proto", () => {
     expect(stable.dataRoot).not.toBe(beta.dataRoot);
   });
 
+  it("derives a shell-neutral immutable runtime store from suite paths", () => {
+    const suite = resolveDistributionSuitePaths({
+      channel: "beta",
+      namespace: "release-beta",
+      namespaceBaseRoot: resolve("/tmp/open-design-beta/namespaces"),
+    });
+    const store = resolveDistributionRuntimeStorePaths(suite);
+    const version = resolveDistributionRuntimeVersionPaths({
+      runtimeDigest: DIGEST_A,
+      runtimeVersion: "1.2.3-beta.4",
+      storePaths: store,
+    });
+
+    expect(store.activePath).toBe(
+      join(suite.runtimeRoot, "store", "state", "active.json"),
+    );
+    expect(store.bindingPath).toBe(
+      join(suite.runtimeRoot, "store", "state", "binding.json"),
+    );
+    expect(store.leasePath).toBe(
+      join(suite.runtimeRoot, "store", "state", "lock", "lease.json"),
+    );
+    expect(store.downloadsRoot).toBe(
+      join(suite.updatesRoot, "runtime", "downloads"),
+    );
+    expect(version.versionRoot).toBe(
+      join(
+        store.versionsRoot,
+        "1.2.3-beta.4",
+        "a".repeat(64),
+      ),
+    );
+    expect(version.payloadRoot).toBe(join(version.versionRoot, "payload"));
+  });
+
+  it("parses a channel-bound shared runtime pointer", () => {
+    expect(parseDistributionRuntimePointer({
+      channel: "beta",
+      generation: 3,
+      namespace: "release-beta",
+      protocolVersion: 1,
+      runtimeDigest: DIGEST_A,
+      runtimeVersion: "1.2.3-beta.4",
+      schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+      updatedAt: "2026-07-27T12:00:00.000Z",
+    })).toEqual({
+      channel: "beta",
+      generation: 3,
+      namespace: "release-beta",
+      protocolVersion: 1,
+      runtimeDigest: DIGEST_A,
+      runtimeVersion: "1.2.3-beta.4",
+      schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+      updatedAt: "2026-07-27T12:00:00.000Z",
+    });
+    expect(() => parseDistributionRuntimePointer({
+      channel: "stable",
+      generation: 3,
+      namespace: "release-stable",
+      protocolVersion: 1,
+      runtimeDigest: DIGEST_A,
+      runtimeVersion: "1.2.3-beta.4",
+      schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+      updatedAt: "2026-07-27T12:00:00.000Z",
+    })).toThrow("stable release version must be x.y.z");
+  });
+
+  it("keeps runtime acquisition ownership in the shared distribution lease", () => {
+    const lease = parseDistributionRuntimeLease({
+      acquiredAt: "2026-07-27T12:00:00.000Z",
+      channel: "beta",
+      expiresAt: "2026-07-27T12:02:00.000Z",
+      leaseId: "lease_12345678901",
+      namespace: "release-beta",
+      owner: {
+        pid: 123,
+        shellType: "codex-plugin",
+      },
+      schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+    });
+
+    expect(isDistributionRuntimeLeaseExpired(
+      lease,
+      Date.parse("2026-07-27T12:01:59.999Z"),
+    )).toBe(false);
+    expect(isDistributionRuntimeLeaseExpired(
+      lease,
+      Date.parse("2026-07-27T12:02:00.000Z"),
+    )).toBe(true);
+  });
+
+  it("parses one shared runtime binding for cross-shell attach", () => {
+    const identity = normalizeDistributionRuntimeIdentity({
+      channel: "beta",
+      namespace: "release-beta",
+      protocolVersion: 1,
+      runtimeDigest: DIGEST_A,
+      runtimeVersion: "1.2.3-beta.4",
+    });
+    expect(parseDistributionRuntimeBinding({
+      ...identity,
+      endpointUrl: "http://127.0.0.1:17456/status",
+      generation: 4,
+      owner: {
+        pid: 456,
+        shellType: "codex-plugin",
+      },
+      schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+      startedAt: "2026-07-27T12:00:00.000Z",
+      updatedAt: "2026-07-27T12:00:01.000Z",
+    })).toMatchObject({
+      ...identity,
+      generation: 4,
+      owner: {
+        pid: 456,
+        shellType: "codex-plugin",
+      },
+    });
+  });
+
   it("rejects relative and cross-namespace shared data roots with typed errors", () => {
     expect(() => resolveDistributionSuitePaths({
       channel: "beta",
@@ -172,7 +300,8 @@ describe("@open-design/distribution-proto", () => {
   });
 
   it("parses a build report and enforces path containment", () => {
-    const artifactRoot = resolve("/tmp/od-distribution");
+    const artifactRoot = resolve("/tmp/od-distribution/marketplace");
+    const runtimePath = resolve(artifactRoot, "..", "runtime", "runtime.mjs");
     expect(parseDistributionBuildReport({
       artifact: {
         digest: DIGEST_B,
@@ -185,8 +314,21 @@ describe("@open-design/distribution-proto", () => {
         manifestPath: resolve(artifactRoot, "plugin", ".codex-plugin", "plugin.json"),
         shellRoot: resolve(artifactRoot, "plugin"),
       },
+      runtimeArtifact: {
+        digest: DIGEST_A,
+        entryPath: "runtime.mjs",
+        path: runtimePath,
+        size: 84,
+      },
       schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
-    }).paths.shellRoot).toBe(resolve(artifactRoot, "plugin"));
+    })).toMatchObject({
+      paths: {
+        shellRoot: resolve(artifactRoot, "plugin"),
+      },
+      runtimeArtifact: {
+        path: runtimePath,
+      },
+    });
 
     expect(() => parseDistributionBuildReport({
       artifact: {
@@ -202,6 +344,27 @@ describe("@open-design/distribution-proto", () => {
       },
       schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
     })).toThrow("shell root escapes artifact root");
+
+    expect(() => parseDistributionBuildReport({
+      artifact: {
+        digest: DIGEST_B,
+        files: [".codex-plugin/plugin.json"],
+        size: 42,
+      },
+      identity: identity(),
+      paths: {
+        artifactRoot,
+        manifestPath: resolve(artifactRoot, "plugin", ".codex-plugin", "plugin.json"),
+        shellRoot: resolve(artifactRoot, "plugin"),
+      },
+      runtimeArtifact: {
+        digest: DIGEST_A,
+        entryPath: "runtime.mjs",
+        path: resolve("/tmp/outside/runtime.mjs"),
+        size: 84,
+      },
+      schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
+    })).toThrow("runtime artifact path escapes");
   });
 
   it("parses loopback fixture reports and compares exact identity", () => {
@@ -241,5 +404,26 @@ describe("@open-design/distribution-proto", () => {
       },
       schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
     })).toThrow("does not match shell digest");
+
+    expect(() => parseDistributionBuildReport({
+      artifact: {
+        digest: DIGEST_B,
+        files: [],
+        size: 0,
+      },
+      identity: identity(),
+      paths: {
+        artifactRoot: resolve("/tmp/od-distribution"),
+        manifestPath: resolve("/tmp/od-distribution/plugin/plugin.json"),
+        shellRoot: resolve("/tmp/od-distribution/plugin"),
+      },
+      runtimeArtifact: {
+        digest: DIGEST_B,
+        entryPath: "runtime.mjs",
+        path: resolve("/tmp/runtime.mjs"),
+        size: 1,
+      },
+      schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
+    })).toThrow("does not match runtime digest");
   });
 });

@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { CODEX_PLUGIN_ENV } from "@open-design/codex-plugin-proto";
+
 import {
   FIXTURE_REPORT_URL_ENV,
   observeFixture,
@@ -12,9 +14,9 @@ import {
   resolveIdentityFile,
 } from "../src/identity.js";
 import {
-  DISTRIBUTION_CHANNEL_ROOT_ENV,
   observeCodexPluginSuite,
   resolveCodexPluginDistributionChannelRoot,
+  resolveCodexPluginRuntimeManifestUrl,
 } from "../src/suite.js";
 
 const RUNTIME_DIGEST = `sha256:${"a".repeat(64)}`;
@@ -81,11 +83,11 @@ describe("codex plugin identity", () => {
   it("maps the Codex shell onto the shared distribution suite paths", () => {
     const channelRoot = join(tmpdir(), "open-design-beta");
     expect(resolveCodexPluginDistributionChannelRoot([], {
-      [DISTRIBUTION_CHANNEL_ROOT_ENV]: channelRoot,
+      [CODEX_PLUGIN_ENV.DISTRIBUTION_CHANNEL_ROOT]: channelRoot,
     })).toBe(channelRoot);
     expect(observeCodexPluginSuite({
       env: {
-        [DISTRIBUTION_CHANNEL_ROOT_ENV]: channelRoot,
+        [CODEX_PLUGIN_ENV.DISTRIBUTION_CHANNEL_ROOT]: channelRoot,
       },
       identity: IDENTITY,
     })).toEqual({
@@ -103,5 +105,19 @@ describe("codex plugin identity", () => {
         updatesRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "updates"),
       },
     });
+  });
+
+  it("accepts only explicit secure or loopback runtime manifests", () => {
+    expect(resolveCodexPluginRuntimeManifestUrl(
+      ["--runtime-manifest-url", "http://127.0.0.1:17456/manifest.json"],
+      {
+        [CODEX_PLUGIN_ENV.RUNTIME_MANIFEST_URL]:
+          "https://updates.example.com/runtime.json",
+      },
+    )).toBe("http://127.0.0.1:17456/manifest.json");
+    expect(() => resolveCodexPluginRuntimeManifestUrl(
+      ["--runtime-manifest-url", "http://example.com/runtime.json"],
+      {},
+    )).toThrow("https or loopback http");
   });
 });

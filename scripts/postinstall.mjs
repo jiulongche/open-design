@@ -20,6 +20,7 @@ const buildTargets = [
   "packages/plugin-runtime",
   "packages/sidecar-proto",
   "packages/distribution-proto",
+  "packages/codex-plugin-proto",
   "packages/launcher-proto",
   "packages/sidecar",
   "packages/diagnostics",

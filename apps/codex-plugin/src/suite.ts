@@ -6,9 +6,10 @@ import {
   type DistributionIdentityV1,
   type DistributionSuitePaths,
 } from "@open-design/distribution-proto";
-
-export const DISTRIBUTION_CHANNEL_ROOT_ARG = "--distribution-channel-root";
-export const DISTRIBUTION_CHANNEL_ROOT_ENV = "OD_DISTRIBUTION_CHANNEL_ROOT";
+import {
+  CODEX_PLUGIN_ARGS,
+  CODEX_PLUGIN_ENV,
+} from "@open-design/codex-plugin-proto";
 
 export type CodexPluginSuiteObservation =
   | {
@@ -29,14 +30,42 @@ export function resolveCodexPluginDistributionChannelRoot(
   args: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
-  const value = valueAfterArg(args, DISTRIBUTION_CHANNEL_ROOT_ARG)
-    ?? env[DISTRIBUTION_CHANNEL_ROOT_ENV]
+  const value = valueAfterArg(args, CODEX_PLUGIN_ARGS.DISTRIBUTION_CHANNEL_ROOT)
+    ?? env[CODEX_PLUGIN_ENV.DISTRIBUTION_CHANNEL_ROOT]
     ?? null;
   if (value == null || value.trim().length === 0) return null;
   return normalizeDistributionAbsolutePath(
     value.trim(),
     "distribution channel root",
   );
+}
+
+export function resolveCodexPluginRuntimeManifestUrl(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const value = valueAfterArg(args, CODEX_PLUGIN_ARGS.RUNTIME_MANIFEST_URL)
+    ?? env[CODEX_PLUGIN_ENV.RUNTIME_MANIFEST_URL]
+    ?? null;
+  if (value == null || value.trim().length === 0) return null;
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new Error("Codex plugin runtime manifest URL must be valid");
+  }
+  if (url.username.length > 0 || url.password.length > 0 || url.hash.length > 0) {
+    throw new Error(
+      "Codex plugin runtime manifest URL must not contain credentials or a fragment",
+    );
+  }
+  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error(
+      "Codex plugin runtime manifest URL must use https or loopback http",
+    );
+  }
+  return url.toString();
 }
 
 export function observeCodexPluginSuite(options: {

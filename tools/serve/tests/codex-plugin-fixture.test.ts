@@ -1,7 +1,12 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import {
+  parseCodexPluginAcquisitionManifest,
+  parseCodexPluginFixtureReport,
+} from "@open-design/codex-plugin-proto";
 import {
   assertSameDistributionIdentity,
   parseDistributionServeReport,
@@ -10,11 +15,14 @@ import { describe, expect, it } from "vitest";
 
 import { startCodexPluginFixtureServer } from "../src/codex-plugin-fixture.js";
 
+const RUNTIME_BYTES = Buffer.from("export {};\n");
+const RUNTIME_DIGEST =
+  `sha256:${createHash("sha256").update(RUNTIME_BYTES).digest("hex")}`;
 const IDENTITY = {
   channel: "beta",
   namespace: "codex-smoke",
   protocolVersion: 1,
-  runtimeDigest: `sha256:${"a".repeat(64)}`,
+  runtimeDigest: RUNTIME_DIGEST,
   runtimeVersion: "0.16.1-beta.1",
   shellDigest: `sha256:${"b".repeat(64)}`,
   shellType: "codex-plugin",
@@ -24,7 +32,10 @@ const IDENTITY = {
 async function writeBuildReport(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "open-design-codex-plugin-serve-"));
   const shellRoot = join(root, "marketplace", "plugins", "open-design");
+  const runtimePath = join(root, "runtime", "runtime.mjs");
   await mkdir(join(shellRoot, ".codex-plugin"), { recursive: true });
+  await mkdir(join(root, "runtime"), { recursive: true });
+  await writeFile(runtimePath, RUNTIME_BYTES);
   const path = join(root, "build-report.json");
   await writeFile(path, JSON.stringify({
     artifact: {
@@ -38,6 +49,12 @@ async function writeBuildReport(): Promise<string> {
       manifestPath: join(shellRoot, ".codex-plugin", "plugin.json"),
       shellRoot,
     },
+    runtimeArtifact: {
+      digest: RUNTIME_DIGEST,
+      entryPath: "runtime.mjs",
+      path: runtimePath,
+      size: RUNTIME_BYTES.byteLength,
+    },
     schemaVersion: 1,
   }));
   return path;
@@ -49,6 +66,7 @@ describe("Codex plugin fixture", () => {
       buildReportPath: await writeBuildReport(),
     });
     try {
+      expect(parseCodexPluginFixtureReport(server.info)).toEqual(server.info);
       const report = parseDistributionServeReport(
         await (await fetch(server.info.endpointUrl.replace("/runtime", "/report"))).json(),
       );
@@ -61,6 +79,14 @@ describe("Codex plugin fixture", () => {
       };
       expect(runtime.identity).toEqual(IDENTITY);
       expect(runtime.runtime?.version).toBe(IDENTITY.runtimeVersion);
+
+      const manifest = parseCodexPluginAcquisitionManifest(
+        await (await fetch(server.info.runtimeManifestUrl)).json(),
+      );
+      expect(manifest.runtimeDigest).toBe(RUNTIME_DIGEST);
+      expect(Buffer.from(
+        await (await fetch(manifest.artifact.url)).arrayBuffer(),
+      )).toEqual(RUNTIME_BYTES);
 
       const health = await (await fetch(server.info.healthUrl)).json() as {
         ok?: boolean;

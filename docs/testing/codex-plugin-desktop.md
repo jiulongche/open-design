@@ -26,13 +26,26 @@ The current local bootstrap accepts an explicit suite binding through
 `packages/distribution-proto`, including the same `OD_DATA_DIR` scoping rules
 as packaged. Without that binding, the read-only status tool reports
 `suite.configured: false`; runtime acquisition and handoff must not guess a
-different root.
+different root. Runtime acquisition additionally requires
+`--runtime-manifest-url` or `OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL`; the two
+bindings are supplied together by the acceptance control plane.
+The plugin `.mcp.json` explicitly forwards these variables (plus optional
+`OD_DATA_DIR`) into its stdio server; arbitrary host environment is not
+implicitly inherited by plugin MCP processes.
+
+The MCP catalog is static from initialize: `get_open_design_status` remains
+read-only, while `ensure_open_design_runtime` lazily acquires or attaches the
+exact runtime. Acquisition uses the shared runtime store and lease below the
+suite namespace, writes a Codex-only handoff journal, starts the runtime
+detached, validates its one-time ready-file token digest and loopback identity,
+then advances the shared binding and active pointer.
 
 ## Ownership and safety model
 
-`tools-pack` builds a relocatable local Codex marketplace. `tools-serve`
-provides an optional identity-bound runtime fixture. `tools-codex` owns the
-Codex Desktop acceptance lifecycle.
+`tools-pack` builds a relocatable local Codex marketplace plus a deterministic
+acceptance-only runtime probe artifact. `tools-serve` validates and serves that
+artifact with an identity-bound acquisition manifest. `tools-codex` owns the
+Codex Desktop acceptance lifecycle and the host-independent handoff probe.
 
 Each acceptance environment lives at:
 
@@ -76,7 +89,6 @@ pnpm tools-pack codex-plugin build \
   --channel stable \
   --namespace codex-smoke-build \
   --runtime-version 0.16.1 \
-  --runtime-digest sha256:<64-lowercase-hex> \
   --protocol-version 1 \
   --json
 ```
@@ -87,11 +99,44 @@ The default report is:
 .tmp/tools-pack/out/codex-plugin/namespaces/<namespace>/build-report.json
 ```
 
-Its `paths.artifactRoot` is the local marketplace root. Paths inside the
+Its `paths.artifactRoot` is the local marketplace root and
+`runtimeArtifact` records the exact generated runtime bytes, digest, entry
+path, and size. The runtime digest in the identity is calculated from those
+bytes; `--runtime-digest` is an optional assertion, not a second source of
+truth. Paths inside the
 plugin manifest and MCP config remain package-relative; absolute paths exist
 only in the tool report. Generated marketplaces use `authentication: ON_USE`,
 which is accepted by current Codex plugin validation while preserving the
 plugin's explicit runtime boundary.
+
+## Serve and probe the runtime handoff
+
+Start the loopback fixture in a dedicated terminal:
+
+```bash
+pnpm tools-serve start codex-plugin \
+  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
+  --json
+```
+
+The JSON result contains `runtimeManifestUrl`; `/report` remains the
+shell-identity fixture consumed by the status path. Use one explicit absolute
+channel root for the shared suite:
+
+```bash
+pnpm tools-codex handoff \
+  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
+  --distribution-channel-root <absolute-shared-channel-root> \
+  --runtime-manifest-url <runtimeManifestUrl> \
+  --fixture-report-url <endpoint-origin>/report \
+  --json
+```
+
+The first call must return a confirmed handoff. A repeated call must return
+`attached: true` for the same exact binding. If the runtime owner later exits,
+the next call may remove only that dead binding while holding the shared lease,
+reuse the immutable artifact, and advance the pointer generation. A live but
+unobservable or incompatible binding quick-fails instead of being replaced.
 
 ## Initialize and inspect an acceptance environment
 
@@ -155,6 +200,12 @@ pnpm tools-codex start \
   --json
 ```
 
+When this run validates runtime handoff, append the same
+`--distribution-channel-root <absolute-shared-channel-root>` and
+`--runtime-manifest-url <runtimeManifestUrl>` pair used by the standalone
+probe. The controlled Desktop root and plugin MCP inherit the pair; no default
+Codex config file is edited.
+
 The controlled Desktop root is recorded first. The command then observes the
 Desktop app-server loading the prepared plugin and writes
 `reports/desktop-host-load.json`.
@@ -210,11 +261,17 @@ pnpm tools-codex invoke \
   --json
 ```
 
-`invoke` runs an ephemeral, read-only, approval-free `codex exec` against the
-same managed `CODEX_HOME`. It accepts only one completed
-`open-design/get_open_design_status` JSONL tool call, an exact structured
-identity, and a completed terminal turn. The report is written to
-`reports/automated-invocation.json`.
+`invoke` runs an ephemeral, read-only `codex exec` against the same managed
+`CODEX_HOME`. It uses `approval_policy=on-request` with
+`approvals_reviewer=auto_review`, so side-effecting MCP calls retain their
+truthful annotations while eligible low/medium-risk approval requests can be
+reviewed without an operator click. Reviewer denial or failure remains a hard
+failure. Without runtime binding flags it accepts only one
+completed `open-design/get_open_design_status` call. With the same explicit
+channel-root/manifest pair, it instead requires exactly one completed
+`open-design/ensure_open_design_runtime` call. Both lanes require an exact
+structured shell identity and completed terminal turn. The report is written
+to `reports/automated-invocation.json`.
 
 Transient incomplete turns may be retried up to two attempts by default.
 Identity mismatch, duplicate target calls, explicit tool failure, and
@@ -232,6 +289,10 @@ pnpm tools-codex accept \
   --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
   --json
 ```
+
+For a handoff run, pass the same channel-root/manifest pair again so the stdio
+acceptance probe validates the runtime tool as well as the saved Desktop and
+Codex-exec evidence.
 
 The default automated gate uses two independent evidence lanes:
 
@@ -270,7 +331,10 @@ must use this provenance envelope:
 ```
 
 Raw tool JSON without explicit Desktop run provenance is rejected instead of
-being allowed to masquerade as Desktop UI evidence.
+being allowed to masquerade as Desktop UI evidence. For a handoff UI
+checkpoint, the same envelope may use
+`"tool": "ensure_open_design_runtime"` while retaining the complete shell
+identity in `structuredContent.identity`.
 
 Possible statuses:
 

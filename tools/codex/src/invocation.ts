@@ -22,15 +22,24 @@ import {
   writeToolCodexReport,
   type ToolCodexPaths,
 } from "./state.js";
+import {
+  toolCodexRuntimeEnv,
+  type ToolCodexRuntimeBinding,
+} from "./runtime.js";
 
-export const TOOL_CODEX_INVOCATION_SCHEMA_VERSION = 1 as const;
+export const TOOL_CODEX_INVOCATION_SCHEMA_VERSION = 2 as const;
 export const TOOLS_CODEX_INVOKE_ID_ENV = "OD_TOOLS_CODEX_INVOKE_ID";
 
-const INVOCATION_PROMPT = [
-  "Use $open-design:open-design-status.",
-  "Call the get_open_design_status tool exactly once.",
-  "Return only a compact confirmation containing the complete structured identity.",
-].join(" ");
+const STATUS_TOOL_NAME = "get_open_design_status";
+const ENSURE_RUNTIME_TOOL_NAME = "ensure_open_design_runtime";
+
+function invocationPrompt(targetTool: string): string {
+  return [
+    "Use $open-design:open-design-status.",
+    `Call the ${targetTool} tool exactly once.`,
+    "Return only a compact confirmation containing the complete structured identity.",
+  ].join(" ");
+}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -49,10 +58,12 @@ export type ToolCodexInvocationAttempt = {
   };
   retryable: boolean;
   status: "PASS" | "FAIL";
+  targetTool: string;
   terminalEvent: "turn.completed" | "turn.failed" | null;
   threadId: string | null;
   timedOut: boolean;
   toolCallCount: number;
+  toolCallError: string | null;
   toolCallStatus: string | null;
   usage: unknown | null;
 };
@@ -63,7 +74,8 @@ export type ToolCodexAutomatedInvocationReportV1 = {
   generatedAt: string;
   identity: DistributionIdentityV1;
   provenance: {
-    approvalPolicy: "never";
+    approvalPolicy: "on-request";
+    approvalsReviewer: "auto_review";
     desktopRootPid: number;
     desktopRunId: string;
     desktopRootStartedAt: string;
@@ -106,6 +118,7 @@ function observedIdentity(value: unknown): DistributionIdentityV1 | null {
 export function parseCodexExecJsonl(
   stdout: string,
   expectedIdentity: DistributionIdentityV1,
+  targetTool = STATUS_TOOL_NAME,
 ): Omit<ToolCodexInvocationAttempt, "commandExitCode" | "diagnostics" | "durationMs" | "index" | "residualCleanup" | "timedOut"> {
   const events: JsonRecord[] = [];
   let invalidJsonLines = 0;
@@ -126,7 +139,7 @@ export function parseCodexExecJsonl(
     if (event.type !== "item.completed" || !isRecord(event.item)) return false;
     return event.item.type === "mcp_tool_call"
       && event.item.server === "open-design"
-      && event.item.tool === "get_open_design_status";
+      && event.item.tool === targetTool;
   });
   const toolCall = targetCalls[0]?.item;
   const terminal = [...events].reverse().find((event) =>
@@ -144,6 +157,11 @@ export function parseCodexExecJsonl(
   }
   const toolCallStatus = isRecord(toolCall) && typeof toolCall.status === "string"
     ? toolCall.status
+    : null;
+  const toolCallError = isRecord(toolCall)
+    && isRecord(toolCall.error)
+    && typeof toolCall.error.message === "string"
+    ? toolCall.error.message
     : null;
   const terminalEvent = terminal?.type === "turn.completed"
     ? "turn.completed"
@@ -167,9 +185,11 @@ export function parseCodexExecJsonl(
     invalidJsonLines,
     retryable,
     status: passed ? "PASS" : "FAIL",
+    targetTool,
     terminalEvent,
     threadId: typeof thread?.thread_id === "string" ? thread.thread_id : null,
     toolCallCount: targetCalls.length,
+    toolCallError,
     toolCallStatus,
     usage: terminal?.type === "turn.completed" ? terminal.usage ?? null : null,
   };
@@ -196,7 +216,8 @@ export function parseToolCodexAutomatedInvocationReport(
       "automated invocation report is invalid",
     );
   }
-  if (value.provenance.approvalPolicy !== "never"
+  if (value.provenance.approvalPolicy !== "on-request"
+    || value.provenance.approvalsReviewer !== "auto_review"
     || value.provenance.ephemeral !== true
     || value.provenance.sandbox !== "read-only"
     || typeof value.provenance.workspace !== "string"
@@ -219,6 +240,9 @@ export function parseToolCodexAutomatedInvocationReport(
       || typeof attempt.retryable !== "boolean"
       || typeof attempt.timedOut !== "boolean"
       || typeof attempt.toolCallCount !== "number"
+      || (attempt.toolCallError != null
+        && typeof attempt.toolCallError !== "string")
+      || typeof attempt.targetTool !== "string"
       || !isRecord(attempt.residualCleanup)
       || !Array.isArray(attempt.residualCleanup.matchedPids)
       || !Array.isArray(attempt.residualCleanup.remainingPids)
@@ -245,6 +269,7 @@ export function parseToolCodexAutomatedInvocationReport(
       || successfulAttempt.terminalEvent !== "turn.completed"
       || successfulAttempt.timedOut !== false
       || successfulAttempt.toolCallCount !== 1
+      || successfulAttempt.toolCallError !== null
       || successfulAttempt.toolCallStatus !== "completed"
       || successfulAttempt.residualCleanup.remainingPids.length !== 0) {
       throw new ToolCodexError(
@@ -276,6 +301,7 @@ export async function runToolCodexAutomatedInvocation(options: {
   maxAttempts?: number;
   outputPath?: string;
   paths: ToolCodexPaths;
+  runtimeBinding?: ToolCodexRuntimeBinding | null;
   timeoutMs?: number;
 }): Promise<ToolCodexAutomatedInvocationReportV1> {
   const buildReportPath = resolve(options.buildReportPath);
@@ -326,6 +352,9 @@ export async function runToolCodexAutomatedInvocation(options: {
       );
     }
     const invocationId = randomUUID();
+    const targetTool = options.runtimeBinding == null
+      ? STATUS_TOOL_NAME
+      : ENSURE_RUNTIME_TOOL_NAME;
     const attempts: ToolCodexInvocationAttempt[] = [];
     for (let index = 1; index <= maxAttempts; index += 1) {
       const startedAt = Date.now();
@@ -335,23 +364,30 @@ export async function runToolCodexAutomatedInvocation(options: {
         "--sandbox",
         "read-only",
         "--ask-for-approval",
-        "never",
+        "on-request",
+        "-c",
+        'approvals_reviewer="auto_review"',
         "exec",
         "--ephemeral",
         "--skip-git-repo-check",
         "-C",
         options.paths.workspaceRoot,
         "--json",
-        INVOCATION_PROMPT,
+        invocationPrompt(targetTool),
       ], {
         env: {
           ...process.env,
           CODEX_HOME: options.paths.codexHome,
           [TOOLS_CODEX_INVOKE_ID_ENV]: invocationId,
+          ...toolCodexRuntimeEnv(options.runtimeBinding),
         },
         timeoutMs,
       });
-      const parsed = parseCodexExecJsonl(result.stdout, buildReport.identity);
+      const parsed = parseCodexExecJsonl(
+        result.stdout,
+        buildReport.identity,
+        targetTool,
+      );
       const matchedPids = await listProcessIdsWithEnvironmentValue({
         commandMatches: invocationProcessCandidate,
         name: TOOLS_CODEX_INVOKE_ID_ENV,
@@ -402,7 +438,8 @@ export async function runToolCodexAutomatedInvocation(options: {
       generatedAt: new Date().toISOString(),
       identity: buildReport.identity,
       provenance: {
-        approvalPolicy: "never",
+        approvalPolicy: "on-request",
+        approvalsReviewer: "auto_review",
         desktopRootPid: host.marker.rootPid,
         desktopRootStartedAt: host.marker.rootStartedAt,
         desktopRunId: host.marker.runId,

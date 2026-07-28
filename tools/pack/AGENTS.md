@@ -7,7 +7,9 @@ Read `tools/pack/CACHE.md` before changing any build-cache node key, adding a ca
 ## Owns
 
 - Local packaging orchestration for packaged Open Design artifacts.
-- Relocatable Codex plugin local-marketplace snapshots and machine-readable build reports.
+- Relocatable Codex plugin local-marketplace snapshots, deterministic local
+  runtime probe artifacts, and machine-readable build reports. The probe is
+  acceptance infrastructure, not the production OD runtime composition.
 - mac build/install/start/stop/logs/uninstall/cleanup smoke commands.
 - Windows NSIS build/install/start/stop/logs/uninstall/cleanup/list/reset smoke commands.
 - Windows registry observation/cleanup must go through `reg.exe` and stay scoped to entries matching the namespace install/uninstaller paths.
@@ -19,6 +21,9 @@ Read `tools/pack/CACHE.md` before changing any build-cache node key, adding a ca
 - Consuming the shared channel/namespace suite resolver from
   `@open-design/distribution-proto`; tools-pack output roots remain tool-owned,
   but runtime namespace roots must not invent a second layout.
+- Codex plugin builds must rebuild `distribution-proto`,
+  `codex-plugin-proto`, then `apps/codex-plugin` before copying the MCP bundle,
+  so packed protocol code never depends on stale workspace `dist`.
 
 ## Does not own
 

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@open-design/codex-plugin-proto": "workspace:*",
     "@open-design/distribution-proto": "workspace:*"
   },
   "devDependencies": {

@@ -28,6 +28,10 @@ import {
   type ToolCodexPaths,
   type ToolCodexRunMarkerV1,
 } from "./state.js";
+import {
+  toolCodexRuntimeEnv,
+  type ToolCodexRuntimeBinding,
+} from "./runtime.js";
 
 export const TOOLS_CODEX_RUN_ID_ENV = "OD_TOOLS_CODEX_RUN_ID";
 export const TOOLS_CODEX_HOME_DIGEST_ENV = "OD_TOOLS_CODEX_HOME_DIGEST";
@@ -508,6 +512,7 @@ export async function startToolCodexDesktop(options: {
   appPath?: string;
   codexBin?: string;
   paths: ToolCodexPaths;
+  runtimeBinding?: ToolCodexRuntimeBinding | null;
   workspace?: string;
 }): Promise<ToolCodexStartResult> {
   if (process.platform !== "darwin") {
@@ -546,6 +551,7 @@ export async function startToolCodexDesktop(options: {
         env: codexEnv(options.paths, {
           [TOOLS_CODEX_HOME_DIGEST_ENV]: codexHomeDigest(options.paths.codexHome),
           [TOOLS_CODEX_RUN_ID_ENV]: runId,
+          ...toolCodexRuntimeEnv(options.runtimeBinding),
         }),
       });
       if (result.code !== 0) {

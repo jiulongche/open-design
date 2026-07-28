@@ -25,7 +25,17 @@ async function createWorkspace(): Promise<string> {
     name: "open-design",
     version: "0.0.0",
   }));
-  await writeFile(join(pluginRoot, ".mcp.json"), "{}");
+  await writeFile(join(pluginRoot, ".mcp.json"), JSON.stringify({
+    mcpServers: {
+      "open-design": {
+        env_vars: [
+          "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
+          "OD_DATA_DIR",
+          "OD_DISTRIBUTION_CHANNEL_ROOT",
+        ],
+      },
+    },
+  }));
   await writeFile(join(pluginRoot, "skills", "status", "SKILL.md"), "# Status\n");
   await writeFile(join(appRoot, "dist", "mcp", "server.mjs"), "export {};\n");
   return root;
@@ -48,7 +58,6 @@ describe("tools-pack codex-plugin", () => {
       dir: join(workspaceRoot, "tool-root"),
       namespace: "smoke",
       protocolVersion: 2,
-      runtimeDigest: `sha256:${"a".repeat(64)}`,
       runtimeVersion: "2.0.0-beta.1",
       shellVersion: "0.2.0",
       skipAppBuild: true,
@@ -68,11 +77,29 @@ describe("tools-pack codex-plugin", () => {
     expect(report.artifact.files).toContain("mcp/server.mjs");
     expect(report.artifact.files).not.toContain("distribution.json");
     expect((await stat(join(report.paths.shellRoot, "distribution.json"))).isFile()).toBe(true);
+    expect(report.runtimeArtifact).toMatchObject({
+      digest: report.identity.runtimeDigest,
+      entryPath: "runtime.mjs",
+    });
+    expect((await stat(report.runtimeArtifact!.path)).mode & 0o100).toBe(0o100);
 
     const manifest = JSON.parse(await readFile(report.paths.manifestPath, "utf8")) as {
       version?: string;
     };
     expect(manifest.version).toBe("0.2.0");
+    const mcpConfig = JSON.parse(await readFile(
+      join(report.paths.shellRoot, ".mcp.json"),
+      "utf8",
+    )) as {
+      mcpServers?: {
+        "open-design"?: { env_vars?: string[] };
+      };
+    };
+    expect(mcpConfig.mcpServers?.["open-design"]?.env_vars).toEqual([
+      "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
+      "OD_DATA_DIR",
+      "OD_DISTRIBUTION_CHANNEL_ROOT",
+    ]);
 
     const marketplace = JSON.parse(await readFile(
       join(report.paths.artifactRoot, ".agents", "plugins", "marketplace.json"),
@@ -103,7 +130,6 @@ describe("tools-pack codex-plugin", () => {
     const workspaceRoot = await createWorkspace();
     await expect(packCodexPlugin({
       channel: "beta",
-      runtimeDigest: `sha256:${"a".repeat(64)}`,
       runtimeVersion: "2.0.0",
       skipAppBuild: true,
       workspaceRoot,
@@ -116,7 +142,6 @@ describe("tools-pack codex-plugin", () => {
       channel: "stable",
       dir: join(workspaceRoot, "tool-root"),
       namespace: "deterministic",
-      runtimeDigest: `sha256:${"a".repeat(64)}`,
       runtimeVersion: "2.0.0",
       skipAppBuild: true,
       workspaceRoot,

@@ -51,6 +51,7 @@ describe("Codex plugin stdio MCP", () => {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toEqual([
         "get_open_design_status",
+        "ensure_open_design_runtime",
       ]);
       const result = await client.callTool({
         arguments: {},

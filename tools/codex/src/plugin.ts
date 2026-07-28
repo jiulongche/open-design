@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   access,
   lstat,
@@ -9,11 +10,14 @@ import { join, relative, resolve, sep } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { CODEX_PLUGIN_ARGS } from "@open-design/codex-plugin-proto";
 import {
   assertSameDistributionIdentity,
+  assertSameDistributionRuntimeIdentity,
   calculateDistributionArtifactInventory,
   distributionIdentityKey,
   parseDistributionBuildReport,
+  parseDistributionRuntimeBinding,
   type DistributionBuildReportV1,
   type DistributionIdentityV1,
 } from "@open-design/distribution-proto";
@@ -36,9 +40,11 @@ import {
   type ToolCodexStatus,
 } from "./host.js";
 import {
+  TOOL_CODEX_INVOCATION_SCHEMA_VERSION,
   parseToolCodexAutomatedInvocationReport,
   type ToolCodexAutomatedInvocationReportV1,
 } from "./invocation.js";
+import type { ToolCodexRuntimeBinding } from "./runtime.js";
 
 export const CODEX_DESKTOP_ACCEPTANCE_STATUSES = [
   "PASS",
@@ -200,6 +206,32 @@ export async function verifyToolCodexArtifact(
       "ARTIFACT_IDENTITY_MISMATCH",
       error instanceof Error ? error.message : String(error),
     );
+  }
+  if (buildReport.runtimeArtifact != null) {
+    const info = await lstat(buildReport.runtimeArtifact.path).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      },
+    );
+    if (info == null || !info.isFile() || info.isSymbolicLink()) {
+      throw new ToolCodexError(
+        "RUNTIME_ARTIFACT_INTEGRITY_MISMATCH",
+        "Open Design runtime artifact is missing, unsafe, or not a regular file",
+      );
+    }
+    const bytes = await readFile(buildReport.runtimeArtifact.path);
+    const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    if (
+      bytes.byteLength !== buildReport.runtimeArtifact.size
+      || digest !== buildReport.runtimeArtifact.digest
+      || digest !== buildReport.identity.runtimeDigest
+    ) {
+      throw new ToolCodexError(
+        "RUNTIME_ARTIFACT_INTEGRITY_MISMATCH",
+        "Open Design runtime artifact no longer matches its tools-pack build report",
+      );
+    }
   }
 }
 
@@ -497,6 +529,7 @@ export async function prepareToolCodexPlugin(options: {
 async function probeStdio(
   buildReport: DistributionBuildReportV1,
   fixtureReportUrl?: string,
+  runtimeBinding?: ToolCodexRuntimeBinding | null,
 ): Promise<unknown> {
   const args = [
     "./mcp/server.mjs",
@@ -505,6 +538,14 @@ async function probeStdio(
   ];
   if (fixtureReportUrl != null) {
     args.push("--fixture-report-url", fixtureReportUrl);
+  }
+  if (runtimeBinding != null) {
+    args.push(
+      CODEX_PLUGIN_ARGS.DISTRIBUTION_CHANNEL_ROOT,
+      runtimeBinding.distributionChannelRoot,
+      CODEX_PLUGIN_ARGS.RUNTIME_MANIFEST_URL,
+      runtimeBinding.runtimeManifestUrl,
+    );
   }
   const transport = new StdioClientTransport({
     args,
@@ -522,6 +563,9 @@ async function probeStdio(
     if (!tools.tools.some((tool) => tool.name === "get_open_design_status")) {
       throw new Error("Codex plugin status tool is missing");
     }
+    if (!tools.tools.some((tool) => tool.name === "ensure_open_design_runtime")) {
+      throw new Error("Codex plugin runtime handoff tool is missing");
+    }
     const result = await client.callTool({
       arguments: {},
       name: "get_open_design_status",
@@ -534,10 +578,47 @@ async function probeStdio(
       buildReport.identity,
       (status as { identity: DistributionIdentityV1 }).identity,
     );
-    return status;
+    if (runtimeBinding == null) return status;
+    const runtime = await client.callTool({
+      arguments: {},
+      name: "ensure_open_design_runtime",
+    });
+    if (
+      runtime.structuredContent == null
+      || typeof runtime.structuredContent !== "object"
+      || !("binding" in runtime.structuredContent)
+    ) {
+      throw new Error("Codex plugin runtime handoff did not return a binding");
+    }
+    assertSameDistributionRuntimeIdentity(
+      buildReport.identity,
+      parseDistributionRuntimeBinding(
+        (runtime.structuredContent as { binding: unknown }).binding,
+      ),
+    );
+    return { runtime: runtime.structuredContent, status };
   } finally {
     await client.close();
   }
+}
+
+export async function runToolCodexHandoffProbe(options: {
+  buildReportPath: string;
+  fixtureReportUrl?: string;
+  runtimeBinding: ToolCodexRuntimeBinding;
+}): Promise<unknown> {
+  const buildReportPath = resolve(options.buildReportPath);
+  const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
+  await verifyToolCodexArtifact(buildReport);
+  return {
+    buildReportPath,
+    identity: buildReport.identity,
+    observation: await probeStdio(
+      buildReport,
+      options.fixtureReportUrl,
+      options.runtimeBinding,
+    ),
+  };
 }
 
 export function extractObservedIdentity(value: unknown): DistributionIdentityV1 | null {
@@ -569,7 +650,7 @@ export type ToolCodexDesktopUiObservationV1 = {
   structuredContent: {
     identity: DistributionIdentityV1;
   };
-  tool: "get_open_design_status";
+  tool: "ensure_open_design_runtime" | "get_open_design_status";
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -582,7 +663,10 @@ export function parseToolCodexDesktopUiObservation(
   if (!isRecord(value)
     || value.schemaVersion !== TOOL_CODEX_DESKTOP_UI_OBSERVATION_SCHEMA_VERSION
     || value.server !== "open-design"
-    || value.tool !== "get_open_design_status"
+    || (
+      value.tool !== "get_open_design_status"
+      && value.tool !== "ensure_open_design_runtime"
+    )
     || typeof value.capturedAt !== "string"
     || !isRecord(value.provenance)
     || value.provenance.kind !== "operator-captured-desktop-ui"
@@ -744,6 +828,7 @@ export async function runToolCodexAcceptance(options: {
   fixtureReportUrl?: string;
   outputPath?: string;
   paths: ToolCodexPaths;
+  runtimeBinding?: ToolCodexRuntimeBinding | null;
 }): Promise<ToolCodexAcceptanceReport> {
   await readToolCodexSentinel(options.paths);
   const buildReportPath = resolve(options.buildReportPath);
@@ -772,7 +857,11 @@ export async function runToolCodexAcceptance(options: {
   let stdioStatus: unknown | null = null;
   let stdioProbePassed = false;
   try {
-    stdioStatus = await probeStdio(buildReport, options.fixtureReportUrl);
+    stdioStatus = await probeStdio(
+      buildReport,
+      options.fixtureReportUrl,
+      options.runtimeBinding,
+    );
     stdioProbePassed = true;
   } catch (error) {
     stdioStatus = {
@@ -848,7 +937,8 @@ export async function runToolCodexAcceptance(options: {
       generatedAt: new Date().toISOString(),
       identity: buildReport.identity,
       provenance: {
-        approvalPolicy: "never",
+        approvalPolicy: "on-request",
+        approvalsReviewer: "auto_review",
         desktopRootPid: host.marker?.rootPid ?? 0,
         desktopRootStartedAt: host.marker?.rootStartedAt ?? "",
         desktopRunId: host.marker?.runId ?? "",
@@ -859,7 +949,7 @@ export async function runToolCodexAcceptance(options: {
         workspace: options.paths.workspaceRoot,
       },
       reasonCode: "AUTOMATED_INVOCATION_REPORT_INVALID",
-      schemaVersion: 1,
+      schemaVersion: TOOL_CODEX_INVOCATION_SCHEMA_VERSION,
       status: "FAIL",
       successfulAttempt: null,
     };

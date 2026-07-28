@@ -20,8 +20,10 @@ import {
 } from "./invocation.js";
 import {
   prepareToolCodexPlugin,
+  runToolCodexHandoffProbe,
   runToolCodexAcceptance,
 } from "./plugin.js";
+import { resolveToolCodexRuntimeBinding } from "./runtime.js";
 import {
   ToolCodexError,
   initializeToolCodexEnvironment,
@@ -42,7 +44,9 @@ type PrepareOptions = CommonOptions & {
 
 type StartOptions = CommonOptions & {
   buildReport?: string;
+  distributionChannelRoot?: string;
   hostLoadTimeoutMs?: string;
+  runtimeManifestUrl?: string;
   workspace?: string;
 };
 
@@ -54,8 +58,10 @@ type AcceptOptions = PrepareOptions & {
   automatedInvocationReport?: string;
   desktopHostLoadReport?: string;
   desktopUiObservation?: string;
+  distributionChannelRoot?: string;
   fixtureReportUrl?: string;
   out?: string;
+  runtimeManifestUrl?: string;
 };
 
 type CaptureHostLoadOptions = PrepareOptions & {
@@ -64,9 +70,19 @@ type CaptureHostLoadOptions = PrepareOptions & {
 };
 
 type InvokeOptions = PrepareOptions & {
+  distributionChannelRoot?: string;
   maxAttempts?: string;
   out?: string;
+  runtimeManifestUrl?: string;
   timeoutMs?: string;
+};
+
+type HandoffOptions = {
+  buildReport?: string;
+  distributionChannelRoot?: string;
+  fixtureReportUrl?: string;
+  json?: boolean;
+  runtimeManifestUrl?: string;
 };
 
 type CleanOptions = CommonOptions & {
@@ -136,10 +152,22 @@ function printError(error: unknown): never {
   process.exit(1);
 }
 
+const cli = cac("tools-codex");
+
+function runtimeOptions(command: ReturnType<typeof cli.command>) {
+  return command
+    .option(
+      "--distribution-channel-root <path>",
+      "Absolute shared OD distribution channel root",
+    )
+    .option(
+      "--runtime-manifest-url <url>",
+      "Codex plugin runtime acquisition manifest URL",
+    );
+}
+
 process.on("uncaughtException", printError);
 process.on("unhandledRejection", printError);
-
-const cli = cac("tools-codex");
 
 function common(command: ReturnType<typeof cli.command>) {
   return command
@@ -186,7 +214,7 @@ common(cli.command("prepare", "Reconcile a packed Open Design plugin into the ma
     }), options);
   });
 
-common(cli.command("start", "Start one controlled Codex Desktop instance"))
+runtimeOptions(common(cli.command("start", "Start one controlled Codex Desktop instance")))
   .option("--build-report <path>", "Capture Desktop host-load provenance for this build")
   .option("--host-load-timeout-ms <ms>", "Host-load capture timeout", { default: "60000" })
   .option("--workspace <path>", "Workspace to open; defaults to the managed workspace")
@@ -196,6 +224,7 @@ common(cli.command("start", "Start one controlled Codex Desktop instance"))
       appPath: options.appPath,
       codexBin: options.codexBin,
       paths,
+      runtimeBinding: resolveToolCodexRuntimeBinding(options),
       workspace: options.workspace,
     });
     if (options.buildReport == null) {
@@ -239,7 +268,7 @@ common(cli.command("capture-host-load", "Capture Desktop -> app-server -> plugin
     if (report.status === "FAIL") process.exitCode = 1;
   });
 
-common(cli.command("invoke", "Invoke the prepared plugin through same-home Codex exec JSONL"))
+runtimeOptions(common(cli.command("invoke", "Invoke the prepared plugin through same-home Codex exec JSONL")))
   .option("--build-report <path>", "Codex plugin build report from tools-pack")
   .option("--max-attempts <count>", "Retry only transient incomplete turns", { default: "2" })
   .option("--timeout-ms <ms>", "Per-attempt Codex exec timeout", { default: "120000" })
@@ -252,13 +281,14 @@ common(cli.command("invoke", "Invoke the prepared plugin through same-home Codex
       maxAttempts: integerOption(options.maxAttempts, "--max-attempts"),
       outputPath: options.out == null ? undefined : resolve(options.out),
       paths: pathsFor(options),
+      runtimeBinding: resolveToolCodexRuntimeBinding(options),
       timeoutMs: integerOption(options.timeoutMs, "--timeout-ms"),
     });
     printResult(report, options);
     if (report.status === "FAIL") process.exitCode = 1;
   });
 
-common(cli.command("accept", "Combine artifact, Desktop host-load, and automated invocation evidence"))
+runtimeOptions(common(cli.command("accept", "Combine artifact, Desktop host-load, and automated invocation evidence")))
   .option("--build-report <path>", "Codex plugin build report from tools-pack")
   .option("--desktop-host-load-report <path>", "Override Desktop host-load evidence path")
   .option("--automated-invocation-report <path>", "Override automated invocation evidence path")
@@ -276,9 +306,29 @@ common(cli.command("accept", "Combine artifact, Desktop host-load, and automated
       fixtureReportUrl: options.fixtureReportUrl,
       outputPath: options.out,
       paths: pathsFor(options),
+      runtimeBinding: resolveToolCodexRuntimeBinding(options),
     });
     printResult(report, options);
     if (report.status === "FAIL") process.exitCode = 1;
+  });
+
+runtimeOptions(cli.command("handoff", "Probe static MCP bootstrap and exact runtime handoff"))
+  .option("--build-report <path>", "Codex plugin build report from tools-pack")
+  .option("--fixture-report-url <url>", "Optional identity-bound fixture report URL")
+  .option("--json", "Print machine-readable JSON")
+  .action(async (options: HandoffOptions) => {
+    const runtimeBinding = resolveToolCodexRuntimeBinding(options);
+    if (runtimeBinding == null) {
+      throw new ToolCodexError(
+        "RUNTIME_BINDING_REQUIRED",
+        "handoff requires --distribution-channel-root and --runtime-manifest-url",
+      );
+    }
+    printResult(await runToolCodexHandoffProbe({
+      buildReportPath: requireBuildReport(options),
+      fixtureReportUrl: options.fixtureReportUrl,
+      runtimeBinding,
+    }), options);
   });
 
 common(cli.command("clean", "Clean one explicit layer of a managed Codex environment"))

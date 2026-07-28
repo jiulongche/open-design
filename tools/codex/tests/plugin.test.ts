@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -124,6 +125,23 @@ describe("tools-codex acceptance", () => {
     })).toMatchObject({
       provenance: { runId: "run-123" },
     });
+    expect(parseToolCodexDesktopUiObservation({
+      capturedAt: "2026-07-27T12:00:00.000Z",
+      provenance: {
+        kind: "operator-captured-desktop-ui",
+        runId: "run-123",
+      },
+      schemaVersion: 1,
+      server: "open-design",
+      structuredContent: {
+        identity: {
+          channel: "stable",
+        },
+      },
+      tool: "ensure_open_design_runtime",
+    })).toMatchObject({
+      tool: "ensure_open_design_runtime",
+    });
     expect(() => parseToolCodexDesktopUiObservation({
       identity: { channel: "stable" },
     })).toThrowError(expect.objectContaining({
@@ -137,15 +155,20 @@ describe("tools-codex acceptance", () => {
     const shellRoot = join(root, "marketplace", "plugins", "open-design");
     const manifestPath = join(shellRoot, ".codex-plugin", "plugin.json");
     const serverPath = join(shellRoot, "mcp", "server.mjs");
+    const runtimePath = join(root, "runtime", "runtime.mjs");
     await mkdir(join(shellRoot, ".codex-plugin"), { recursive: true });
     await mkdir(join(shellRoot, "mcp"), { recursive: true });
+    await mkdir(join(root, "runtime"), { recursive: true });
     await writeFile(manifestPath, "{}");
     await writeFile(serverPath, "export {};\n");
+    const runtimeBytes = Buffer.from("export const runtime = true;\n");
+    await writeFile(runtimePath, runtimeBytes);
     const identity: DistributionIdentityV1 = {
       channel: "stable",
       namespace: "codex-smoke",
       protocolVersion: 1,
-      runtimeDigest: `sha256:${"a".repeat(64)}`,
+      runtimeDigest:
+        `sha256:${createHash("sha256").update(runtimeBytes).digest("hex")}`,
       runtimeVersion: "0.16.1",
       shellDigest: "",
       shellType: "codex-plugin",
@@ -165,10 +188,21 @@ describe("tools-codex acceptance", () => {
         manifestPath,
         shellRoot,
       },
+      runtimeArtifact: {
+        digest: identity.runtimeDigest,
+        entryPath: "runtime.mjs",
+        path: runtimePath,
+        size: runtimeBytes.byteLength,
+      },
       schemaVersion: 1,
     };
 
     await expect(verifyToolCodexArtifact(report)).resolves.toBeUndefined();
+    await writeFile(runtimePath, "export const runtime = false;\n");
+    await expect(verifyToolCodexArtifact(report)).rejects.toMatchObject({
+      code: "RUNTIME_ARTIFACT_INTEGRITY_MISMATCH",
+    });
+    await writeFile(runtimePath, runtimeBytes);
     await writeFile(serverPath, "export const changed = true;\n");
     await expect(verifyToolCodexArtifact(report)).rejects.toMatchObject({
       code: "ARTIFACT_INTEGRITY_MISMATCH",

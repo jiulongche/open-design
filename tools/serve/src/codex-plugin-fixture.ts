@@ -1,7 +1,16 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { resolve } from "node:path";
 
+import {
+  CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+  CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
+  parseCodexPluginAcquisitionManifest,
+  parseCodexPluginFixtureReport,
+  type CodexPluginAcquisitionManifestV1,
+  type CodexPluginFixtureReportV1,
+} from "@open-design/codex-plugin-proto";
 import {
   DISTRIBUTION_REPORT_SCHEMA_VERSION,
   parseDistributionBuildReport,
@@ -19,7 +28,8 @@ export type CodexPluginFixtureOptions = {
 export type CodexPluginFixtureServer = {
   buildReport: DistributionBuildReportV1;
   close(): Promise<void>;
-  info: DistributionServeReportV1;
+  info: CodexPluginFixtureReportV1;
+  manifest: CodexPluginAcquisitionManifestV1;
 };
 
 function listen(server: Server, port: number, host: string): Promise<void> {
@@ -68,7 +78,20 @@ export async function startCodexPluginFixtureServer(
   const buildReport = parseDistributionBuildReport(
     JSON.parse(await readFile(buildReportPath, "utf8")) as unknown,
   );
-  let info: DistributionServeReportV1 | null = null;
+  if (buildReport.runtimeArtifact == null) {
+    throw new Error("Codex plugin build report does not contain a runtime artifact");
+  }
+  const runtimeBytes = await readFile(buildReport.runtimeArtifact.path);
+  const runtimeDigest =
+    `sha256:${createHash("sha256").update(runtimeBytes).digest("hex")}`;
+  if (
+    runtimeBytes.byteLength !== buildReport.runtimeArtifact.size
+    || runtimeDigest !== buildReport.runtimeArtifact.digest
+  ) {
+    throw new Error("Codex plugin runtime artifact does not match the build report");
+  }
+  let info: CodexPluginFixtureReportV1 | null = null;
+  let manifest: CodexPluginAcquisitionManifestV1 | null = null;
   const server = createServer((request, response) => {
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.statusCode = 405;
@@ -95,7 +118,26 @@ export async function startCodexPluginFixtureServer(
       return;
     }
     if (request.url === "/report" && info != null) {
-      sendJson(response, info);
+      sendJson(response, parseDistributionServeReport({
+        endpointUrl: info.endpointUrl,
+        healthUrl: info.healthUrl,
+        identity: info.identity,
+        schemaVersion: info.schemaVersion,
+      }));
+      return;
+    }
+    if (request.url === "/runtime/manifest.json" && manifest != null) {
+      sendJson(response, manifest);
+      return;
+    }
+    if (request.url === "/runtime/runtime.mjs") {
+      response.statusCode = 200;
+      response.setHeader(
+        "content-type",
+        CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
+      );
+      response.setHeader("content-length", String(runtimeBytes.byteLength));
+      response.end(request.method === "HEAD" ? undefined : runtimeBytes);
       return;
     }
     response.statusCode = 404;
@@ -103,15 +145,33 @@ export async function startCodexPluginFixtureServer(
   });
   await listen(server, options.port ?? 0, host);
   const origin = serverOrigin(server);
-  info = parseDistributionServeReport({
+  manifest = parseCodexPluginAcquisitionManifest({
+    artifact: {
+      digest: buildReport.runtimeArtifact.digest,
+      entryPath: buildReport.runtimeArtifact.entryPath,
+      mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
+      size: buildReport.runtimeArtifact.size,
+      url: `${origin}/runtime/runtime.mjs`,
+    },
+    channel: buildReport.identity.channel,
+    minShellVersion: buildReport.identity.shellVersion,
+    namespace: buildReport.identity.namespace,
+    protocolVersion: buildReport.identity.protocolVersion,
+    runtimeDigest: buildReport.identity.runtimeDigest,
+    runtimeVersion: buildReport.identity.runtimeVersion,
+    schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+  });
+  info = parseCodexPluginFixtureReport({
     endpointUrl: `${origin}/runtime`,
     healthUrl: `${origin}/health`,
     identity: buildReport.identity,
+    runtimeManifestUrl: `${origin}/runtime/manifest.json`,
     schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
   });
   return {
     buildReport,
     close: () => close(server),
     info,
+    manifest,
   };
 }

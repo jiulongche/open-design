@@ -13,9 +13,14 @@ import {
   resolveFixtureReportUrl,
   resolveIdentityFile,
 } from "./identity.js";
-import { observeCodexPluginSuite } from "./suite.js";
+import { CodexPluginRuntimeLauncher } from "./launcher.js";
+import {
+  observeCodexPluginSuite,
+  resolveCodexPluginRuntimeManifestUrl,
+} from "./suite.js";
 
-const STATUS_TOOL_NAME = "get_open_design_status";
+export const STATUS_TOOL_NAME = "get_open_design_status";
+export const ENSURE_RUNTIME_TOOL_NAME = "ensure_open_design_runtime";
 const IDENTITY_RESOURCE_URI = "od://distribution/identity";
 
 async function run(): Promise<void> {
@@ -24,6 +29,15 @@ async function run(): Promise<void> {
   const identity = await readDistributionIdentity(identityFile);
   const fixtureReportUrl = resolveFixtureReportUrl(args);
   const suite = observeCodexPluginSuite({ args, identity });
+  const runtimeManifestUrl = resolveCodexPluginRuntimeManifestUrl(args);
+  const runtimeLauncher = suite.configured && runtimeManifestUrl != null
+    ? new CodexPluginRuntimeLauncher({
+        identity,
+        manifestUrl: runtimeManifestUrl,
+        shellVersion: identity.shellVersion,
+        suitePaths: suite.paths,
+      })
+    : null;
 
   const server = new Server(
     {
@@ -57,6 +71,23 @@ async function run(): Promise<void> {
         name: STATUS_TOOL_NAME,
         title: "Get Open Design status",
       },
+      {
+        annotations: {
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+          readOnlyHint: false,
+        },
+        description:
+          "Acquire or attach the exact Open Design runtime for this channel and namespace, then complete a fail-closed local handoff.",
+        inputSchema: {
+          additionalProperties: false,
+          properties: {},
+          type: "object",
+        },
+        name: ENSURE_RUNTIME_TOOL_NAME,
+        title: "Ensure Open Design runtime",
+      },
     ],
   }));
 
@@ -87,6 +118,27 @@ async function run(): Promise<void> {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (request.params.name === ENSURE_RUNTIME_TOOL_NAME) {
+      if (runtimeLauncher == null) {
+        throw new Error(
+          "Open Design runtime handoff requires both a configured distribution channel root and runtime manifest URL",
+        );
+      }
+      const result = await runtimeLauncher.ensureRuntime();
+      const structuredContent = {
+        ...result,
+        identity,
+      };
+      return {
+        content: [
+          {
+            text: JSON.stringify(structuredContent, null, 2),
+            type: "text",
+          },
+        ],
+        structuredContent,
+      };
+    }
     if (request.params.name !== STATUS_TOOL_NAME) {
       throw new Error(`unsupported tool: ${request.params.name}`);
     }

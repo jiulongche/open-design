@@ -18,6 +18,8 @@ import {
 import { normalizeNamespace } from "@open-design/sidecar-proto";
 
 export const DISTRIBUTION_REPORT_SCHEMA_VERSION = 1 as const;
+export const DISTRIBUTION_RUNTIME_SCHEMA_VERSION = 1 as const;
+export const DISTRIBUTION_DEFAULT_RUNTIME_LEASE_TTL_MS = 120_000 as const;
 
 export const DISTRIBUTION_SHELL_TYPES = Object.freeze({
   CODEX_PLUGIN: "codex-plugin",
@@ -27,12 +29,15 @@ export const DISTRIBUTION_SHELL_TYPES = Object.freeze({
 export type DistributionShellType =
   (typeof DISTRIBUTION_SHELL_TYPES)[keyof typeof DISTRIBUTION_SHELL_TYPES];
 
-export type DistributionIdentityV1 = {
+export type DistributionRuntimeIdentityV1 = {
   channel: ReleaseChannel;
   namespace: string;
   protocolVersion: number;
   runtimeDigest: string;
   runtimeVersion: string;
+};
+
+export type DistributionIdentityV1 = DistributionRuntimeIdentityV1 & {
   shellDigest: string;
   shellType: DistributionShellType;
   shellVersion: string;
@@ -68,6 +73,68 @@ export type DistributionSuitePaths = {
   updatesRoot: string;
 };
 
+export type DistributionRuntimeStorePaths = {
+  activePath: string;
+  bindingPath: string;
+  downloadsRoot: string;
+  leasePath: string;
+  lockRoot: string;
+  stagingRoot: string;
+  stateRoot: string;
+  storeRoot: string;
+  versionsRoot: string;
+};
+
+export type DistributionRuntimeVersionPathRequest = {
+  runtimeDigest: unknown;
+  runtimeVersion: unknown;
+  storePaths: DistributionRuntimeStorePaths;
+};
+
+export type DistributionRuntimeVersionPaths = DistributionRuntimeStorePaths & {
+  manifestPath: string;
+  payloadRoot: string;
+  runtimeDigest: string;
+  runtimeVersion: string;
+  versionRoot: string;
+};
+
+export type DistributionRuntimePointerV1 = {
+  channel: ReleaseChannel;
+  generation: number;
+  namespace: string;
+  protocolVersion: number;
+  runtimeDigest: string;
+  runtimeVersion: string;
+  schemaVersion: typeof DISTRIBUTION_RUNTIME_SCHEMA_VERSION;
+  updatedAt: string;
+};
+
+export type DistributionRuntimeLeaseV1 = {
+  acquiredAt: string;
+  channel: ReleaseChannel;
+  expiresAt: string;
+  leaseId: string;
+  namespace: string;
+  owner: {
+    pid: number;
+    shellType: DistributionShellType;
+  };
+  schemaVersion: typeof DISTRIBUTION_RUNTIME_SCHEMA_VERSION;
+};
+
+export type DistributionRuntimeBindingV1 = DistributionRuntimeIdentityV1 & {
+  endpointUrl: string;
+  generation: number;
+  owner: {
+    pid: number;
+    shellType: DistributionShellType;
+  };
+  schemaVersion: typeof DISTRIBUTION_RUNTIME_SCHEMA_VERSION;
+  startedAt: string;
+  updatedAt: string;
+};
+
 export type DistributionArtifactInventoryV1 = {
   digest: string;
   files: string[];
@@ -85,10 +152,18 @@ export type DistributionBuildPathsV1 = {
   shellRoot: string;
 };
 
+export type DistributionRuntimeArtifactBuildV1 = {
+  digest: string;
+  entryPath: string;
+  path: string;
+  size: number;
+};
+
 export type DistributionBuildReportV1 = {
   artifact: DistributionArtifactInventoryV1;
   identity: DistributionIdentityV1;
   paths: DistributionBuildPathsV1;
+  runtimeArtifact?: DistributionRuntimeArtifactBuildV1;
   schemaVersion: typeof DISTRIBUTION_REPORT_SCHEMA_VERSION;
 };
 
@@ -161,6 +236,29 @@ function normalizePositiveInteger(value: unknown, label: string): number {
 function normalizeNonNegativeInteger(value: unknown, label: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     throw new DistributionProtocolError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function normalizeIsoDate(value: unknown, label: string): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || Number.isNaN(Date.parse(value))
+  ) {
+    throw new DistributionProtocolError(`${label} must be an ISO date string`);
+  }
+  return value;
+}
+
+function normalizeDistributionOpaqueId(value: unknown, label: string): string {
+  if (
+    typeof value !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(value)
+  ) {
+    throw new DistributionProtocolError(
+      `${label} must be 16-128 URL-safe characters`,
+    );
   }
   return value;
 }
@@ -281,6 +379,25 @@ export function resolveDistributionSuitePaths(
   };
 }
 
+export function resolveDistributionRuntimeStorePaths(
+  suitePaths: DistributionSuitePaths,
+): DistributionRuntimeStorePaths {
+  const storeRoot = join(suitePaths.runtimeRoot, "store");
+  const stateRoot = join(storeRoot, "state");
+  const runtimeUpdatesRoot = join(suitePaths.updatesRoot, "runtime");
+  return {
+    activePath: join(stateRoot, "active.json"),
+    bindingPath: join(stateRoot, "binding.json"),
+    downloadsRoot: join(runtimeUpdatesRoot, "downloads"),
+    leasePath: join(stateRoot, "lock", "lease.json"),
+    lockRoot: join(stateRoot, "lock"),
+    stagingRoot: join(runtimeUpdatesRoot, "staging"),
+    stateRoot,
+    storeRoot,
+    versionsRoot: join(storeRoot, "versions"),
+  };
+}
+
 export function normalizeDistributionVersion(value: unknown, label = "version"): string {
   if (typeof value !== "string") {
     throw new DistributionProtocolError(`${label} must be a string`);
@@ -321,6 +438,59 @@ export function normalizeDistributionRuntimeVersion(
   return version;
 }
 
+export function normalizeDistributionRuntimeIdentity(
+  value: unknown,
+): DistributionRuntimeIdentityV1 {
+  const record = assertRecord(value, "distribution runtime identity");
+  assertAllowedKeys(record, [
+    "channel",
+    "namespace",
+    "protocolVersion",
+    "runtimeDigest",
+    "runtimeVersion",
+  ], "distribution runtime identity");
+  const channel = normalizeDistributionChannel(record.channel);
+  return {
+    channel,
+    namespace: normalizeDistributionNamespace(record.namespace),
+    protocolVersion: normalizePositiveInteger(record.protocolVersion, "protocol version"),
+    runtimeDigest: normalizeDistributionDigest(record.runtimeDigest, "runtime digest"),
+    runtimeVersion: normalizeDistributionRuntimeVersion(record.runtimeVersion, channel),
+  };
+}
+
+export function distributionRuntimeIdentityKey(
+  identity: DistributionRuntimeIdentityV1,
+): string {
+  const normalized = normalizeDistributionRuntimeIdentity({
+    channel: identity.channel,
+    namespace: identity.namespace,
+    protocolVersion: identity.protocolVersion,
+    runtimeDigest: identity.runtimeDigest,
+    runtimeVersion: identity.runtimeVersion,
+  });
+  return [
+    normalized.channel,
+    normalized.namespace,
+    normalized.runtimeVersion,
+    normalized.runtimeDigest,
+    normalized.protocolVersion.toString(),
+  ].join("|");
+}
+
+export function assertSameDistributionRuntimeIdentity(
+  expected: DistributionRuntimeIdentityV1,
+  actual: DistributionRuntimeIdentityV1,
+): void {
+  const expectedKey = distributionRuntimeIdentityKey(expected);
+  const actualKey = distributionRuntimeIdentityKey(actual);
+  if (expectedKey !== actualKey) {
+    throw new DistributionProtocolError(
+      `distribution runtime identity mismatch: expected ${expectedKey}; got ${actualKey}`,
+    );
+  }
+}
+
 export function normalizeDistributionDigest(value: unknown, label = "digest"): string {
   if (typeof value !== "string" || !/^sha256:[0-9a-f]{64}$/.test(value)) {
     throw new DistributionProtocolError(
@@ -328,6 +498,196 @@ export function normalizeDistributionDigest(value: unknown, label = "digest"): s
     );
   }
   return value;
+}
+
+export function resolveDistributionRuntimeVersionPaths(
+  request: DistributionRuntimeVersionPathRequest,
+): DistributionRuntimeVersionPaths {
+  const runtimeVersion = normalizeDistributionVersion(
+    request.runtimeVersion,
+    "runtime version",
+  );
+  const runtimeDigest = normalizeDistributionDigest(
+    request.runtimeDigest,
+    "runtime digest",
+  );
+  const versionRoot = join(
+    request.storePaths.versionsRoot,
+    runtimeVersion,
+    runtimeDigest.slice("sha256:".length),
+  );
+  return {
+    ...request.storePaths,
+    manifestPath: join(versionRoot, "manifest.json"),
+    payloadRoot: join(versionRoot, "payload"),
+    runtimeDigest,
+    runtimeVersion,
+    versionRoot,
+  };
+}
+
+export function parseDistributionRuntimePointer(
+  value: unknown,
+): DistributionRuntimePointerV1 {
+  const record = assertRecord(value, "distribution runtime pointer");
+  assertAllowedKeys(record, [
+    "channel",
+    "generation",
+    "namespace",
+    "protocolVersion",
+    "runtimeDigest",
+    "runtimeVersion",
+    "schemaVersion",
+    "updatedAt",
+  ], "distribution runtime pointer");
+  if (record.schemaVersion !== DISTRIBUTION_RUNTIME_SCHEMA_VERSION) {
+    throw new DistributionProtocolError(
+      `unsupported distribution runtime schema version: ${String(record.schemaVersion)}`,
+    );
+  }
+  const channel = normalizeDistributionChannel(record.channel);
+  if (
+    typeof record.updatedAt !== "string"
+    || record.updatedAt.length === 0
+    || Number.isNaN(Date.parse(record.updatedAt))
+  ) {
+    throw new DistributionProtocolError(
+      "distribution runtime pointer updatedAt must be an ISO date string",
+    );
+  }
+  return {
+    channel,
+    generation: normalizeNonNegativeInteger(record.generation, "runtime generation"),
+    namespace: normalizeDistributionNamespace(record.namespace),
+    protocolVersion: normalizePositiveInteger(record.protocolVersion, "protocol version"),
+    runtimeDigest: normalizeDistributionDigest(record.runtimeDigest, "runtime digest"),
+    runtimeVersion: normalizeDistributionRuntimeVersion(record.runtimeVersion, channel),
+    schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+    updatedAt: record.updatedAt,
+  };
+}
+
+export function parseDistributionRuntimeLease(
+  value: unknown,
+): DistributionRuntimeLeaseV1 {
+  const record = assertRecord(value, "distribution runtime lease");
+  assertAllowedKeys(record, [
+    "acquiredAt",
+    "channel",
+    "expiresAt",
+    "leaseId",
+    "namespace",
+    "owner",
+    "schemaVersion",
+  ], "distribution runtime lease");
+  if (record.schemaVersion !== DISTRIBUTION_RUNTIME_SCHEMA_VERSION) {
+    throw new DistributionProtocolError(
+      `unsupported distribution runtime schema version: ${String(record.schemaVersion)}`,
+    );
+  }
+  const acquiredAt = normalizeIsoDate(record.acquiredAt, "runtime lease acquiredAt");
+  const expiresAt = normalizeIsoDate(record.expiresAt, "runtime lease expiresAt");
+  if (Date.parse(expiresAt) <= Date.parse(acquiredAt)) {
+    throw new DistributionProtocolError(
+      "distribution runtime lease expiresAt must be after acquiredAt",
+    );
+  }
+  const owner = assertRecord(record.owner, "distribution runtime lease owner");
+  assertAllowedKeys(owner, ["pid", "shellType"], "distribution runtime lease owner");
+  return {
+    acquiredAt,
+    channel: normalizeDistributionChannel(record.channel),
+    expiresAt,
+    leaseId: normalizeDistributionOpaqueId(record.leaseId, "runtime lease id"),
+    namespace: normalizeDistributionNamespace(record.namespace),
+    owner: {
+      pid: normalizePositiveInteger(owner.pid, "runtime lease owner pid"),
+      shellType: normalizeDistributionShellType(owner.shellType),
+    },
+    schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+  };
+}
+
+export function normalizeDistributionRuntimeEndpointUrl(
+  value: unknown,
+): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new DistributionProtocolError(
+      "distribution runtime endpoint URL must be a non-empty string",
+    );
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new DistributionProtocolError(
+      "distribution runtime endpoint URL must be valid",
+    );
+  }
+  if (
+    url.protocol !== "http:"
+    || !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
+    || url.username.length > 0
+    || url.password.length > 0
+    || url.hash.length > 0
+  ) {
+    throw new DistributionProtocolError(
+      "distribution runtime endpoint URL must use credential-free loopback http",
+    );
+  }
+  return url.toString();
+}
+
+export function parseDistributionRuntimeBinding(
+  value: unknown,
+): DistributionRuntimeBindingV1 {
+  const record = assertRecord(value, "distribution runtime binding");
+  assertAllowedKeys(record, [
+    "channel",
+    "endpointUrl",
+    "generation",
+    "namespace",
+    "owner",
+    "protocolVersion",
+    "runtimeDigest",
+    "runtimeVersion",
+    "schemaVersion",
+    "startedAt",
+    "updatedAt",
+  ], "distribution runtime binding");
+  if (record.schemaVersion !== DISTRIBUTION_RUNTIME_SCHEMA_VERSION) {
+    throw new DistributionProtocolError(
+      `unsupported distribution runtime schema version: ${String(record.schemaVersion)}`,
+    );
+  }
+  const runtimeIdentity = normalizeDistributionRuntimeIdentity({
+    channel: record.channel,
+    namespace: record.namespace,
+    protocolVersion: record.protocolVersion,
+    runtimeDigest: record.runtimeDigest,
+    runtimeVersion: record.runtimeVersion,
+  });
+  const owner = assertRecord(record.owner, "distribution runtime binding owner");
+  assertAllowedKeys(owner, ["pid", "shellType"], "distribution runtime binding owner");
+  return {
+    ...runtimeIdentity,
+    endpointUrl: normalizeDistributionRuntimeEndpointUrl(record.endpointUrl),
+    generation: normalizeNonNegativeInteger(record.generation, "runtime generation"),
+    owner: {
+      pid: normalizePositiveInteger(owner.pid, "runtime binding owner pid"),
+      shellType: normalizeDistributionShellType(owner.shellType),
+    },
+    schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+    startedAt: normalizeIsoDate(record.startedAt, "runtime binding startedAt"),
+    updatedAt: normalizeIsoDate(record.updatedAt, "runtime binding updatedAt"),
+  };
+}
+
+export function isDistributionRuntimeLeaseExpired(
+  lease: DistributionRuntimeLeaseV1,
+  nowMs = Date.now(),
+): boolean {
+  return Date.parse(lease.expiresAt) <= nowMs;
 }
 
 export function normalizeDistributionShellType(value: unknown): DistributionShellType {
@@ -349,13 +709,15 @@ export function normalizeDistributionIdentity(value: unknown): DistributionIdent
     "shellVersion",
   ], "distribution identity");
 
-  const channel = normalizeDistributionChannel(record.channel);
+  const runtimeIdentity = normalizeDistributionRuntimeIdentity({
+    channel: record.channel,
+    namespace: record.namespace,
+    protocolVersion: record.protocolVersion,
+    runtimeDigest: record.runtimeDigest,
+    runtimeVersion: record.runtimeVersion,
+  });
   return {
-    channel,
-    namespace: normalizeDistributionNamespace(record.namespace),
-    protocolVersion: normalizePositiveInteger(record.protocolVersion, "protocol version"),
-    runtimeDigest: normalizeDistributionDigest(record.runtimeDigest, "runtime digest"),
-    runtimeVersion: normalizeDistributionRuntimeVersion(record.runtimeVersion, channel),
+    ...runtimeIdentity,
     shellDigest: normalizeDistributionDigest(record.shellDigest, "shell digest"),
     shellType: normalizeDistributionShellType(record.shellType),
     shellVersion: normalizeDistributionVersion(record.shellVersion, "shell version"),
@@ -518,6 +880,37 @@ function normalizeBuildPaths(value: unknown): DistributionBuildPathsV1 {
   return { artifactRoot, manifestPath, shellRoot };
 }
 
+function normalizeRuntimeArtifactBuild(
+  value: unknown,
+  identity: DistributionIdentityV1,
+  paths: DistributionBuildPathsV1,
+): DistributionRuntimeArtifactBuildV1 {
+  const record = assertRecord(value, "distribution runtime artifact");
+  assertAllowedKeys(
+    record,
+    ["digest", "entryPath", "path", "size"],
+    "distribution runtime artifact",
+  );
+  const digest = normalizeDistributionDigest(record.digest, "runtime artifact digest");
+  if (digest !== identity.runtimeDigest) {
+    throw new DistributionProtocolError(
+      `runtime artifact digest ${digest} does not match runtime digest ${identity.runtimeDigest}`,
+    );
+  }
+  const namespaceRoot = resolve(paths.artifactRoot, "..");
+  const path = assertDistributionPathWithinRoot(
+    namespaceRoot,
+    normalizeDistributionAbsolutePath(record.path, "runtime artifact path"),
+    "runtime artifact path",
+  );
+  return {
+    digest,
+    entryPath: normalizeDistributionInventoryPath(record.entryPath),
+    path,
+    size: normalizeNonNegativeInteger(record.size, "runtime artifact size"),
+  };
+}
+
 function normalizeReportSchemaVersion(value: unknown): typeof DISTRIBUTION_REPORT_SCHEMA_VERSION {
   if (value !== DISTRIBUTION_REPORT_SCHEMA_VERSION) {
     throw new DistributionProtocolError(
@@ -531,7 +924,7 @@ export function parseDistributionBuildReport(value: unknown): DistributionBuildR
   const record = assertRecord(value, "distribution build report");
   assertAllowedKeys(
     record,
-    ["artifact", "identity", "paths", "schemaVersion"],
+    ["artifact", "identity", "paths", "runtimeArtifact", "schemaVersion"],
     "distribution build report",
   );
   const identity = normalizeDistributionIdentity(record.identity);
@@ -541,10 +934,15 @@ export function parseDistributionBuildReport(value: unknown): DistributionBuildR
       `artifact digest ${artifact.digest} does not match shell digest ${identity.shellDigest}`,
     );
   }
+  const paths = normalizeBuildPaths(record.paths);
+  const runtimeArtifact = record.runtimeArtifact == null
+    ? null
+    : normalizeRuntimeArtifactBuild(record.runtimeArtifact, identity, paths);
   return {
     artifact,
     identity,
-    paths: normalizeBuildPaths(record.paths),
+    paths,
+    ...(runtimeArtifact == null ? {} : { runtimeArtifact }),
     schemaVersion: normalizeReportSchemaVersion(record.schemaVersion),
   };
 }
