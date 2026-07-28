@@ -15,7 +15,6 @@ Follow the root `AGENTS.md` and `tools/AGENTS.md` first. This tool owns small lo
 - Keep services self-contained and local-first.
 - Do not put product update runtime logic here; this tool serves deterministic fixtures only.
 - New services should use explicit subcommands under `tools-serve start <service>`.
-
 ## collab-cloud fixture (TEMPORARY)
 
 An infra-free, in-memory local backend for the C-lane cross-daemon
@@ -47,3 +46,8 @@ export OD_COLLAB_CLOUD_TOKEN=dev-internal-token
   `src/collab-cloud-fixture.ts` (and its wiring in `src/index.ts`) and repoint
   `OD_COLLAB_CLOUD_URL` at the real service. The daemon needs zero code changes.
   `tests/collab-cloud-fixture.test.ts` locks the fixture's half of the contract.
+
+- Codex plugin fixture promotion keeps one `latest` manifest URL, validates the
+  complete next build before switching, preserves every previously published
+  immutable artifact URL, and rejects fixed-coordinate drift or an attempt to
+  replace bytes at an existing version URL.

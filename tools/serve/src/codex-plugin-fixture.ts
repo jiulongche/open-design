@@ -1,20 +1,14 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { dirname, join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import {
-  CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES,
-  CODEX_PLUGIN_PLATFORM_TARGETS,
   CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
   parseCodexPluginAcquisitionManifest,
-  parseCodexPluginEnvironmentArtifactBuild,
-  parseCodexPluginEnvironmentManifest,
   parseCodexPluginFixtureReport,
   type CodexPluginAcquisitionManifestV1,
-  type CodexPluginEnvironmentArtifactBuildV1,
-  type CodexPluginEnvironmentManifestV1,
   type CodexPluginFixtureReportV1,
 } from "@open-design/codex-plugin-proto";
 import {
@@ -28,14 +22,32 @@ import {
 export type CodexPluginFixtureOptions = {
   buildReportPath: string;
   host?: string;
+  minimumShellVersion?: string;
   port?: number;
+};
+
+export type CodexPluginFixturePromotionOptions = {
+  buildReportPath: string;
+  minimumShellVersion?: string;
 };
 
 export type CodexPluginFixtureServer = {
   buildReport: DistributionBuildReportV1;
   close(): Promise<void>;
-  environmentArtifact: CodexPluginEnvironmentArtifactBuildV1;
-  environmentManifest: CodexPluginEnvironmentManifestV1;
+  info: CodexPluginFixtureReportV1;
+  manifest: CodexPluginAcquisitionManifestV1;
+  promote(
+    options: CodexPluginFixturePromotionOptions,
+  ): Promise<CodexPluginFixtureReportV1>;
+};
+
+type CodexPluginFixturePayload = {
+  buildReport: DistributionBuildReportV1;
+  runtimeBytes: Buffer;
+};
+
+type CodexPluginFixtureRelease = CodexPluginFixturePayload & {
+  artifactPath: string;
   info: CodexPluginFixtureReportV1;
   manifest: CodexPluginAcquisitionManifestV1;
 };
@@ -77,34 +89,15 @@ function sendJson(response: import("node:http").ServerResponse, value: unknown):
   response.end(`${JSON.stringify(value)}\n`);
 }
 
-export async function startCodexPluginFixtureServer(
-  options: CodexPluginFixtureOptions,
-): Promise<CodexPluginFixtureServer> {
-  const host = options.host ?? "127.0.0.1";
-  assertLoopbackHost(host);
-  const buildReportPath = resolve(options.buildReportPath);
+async function loadFixturePayload(
+  buildReportPath: string,
+): Promise<CodexPluginFixturePayload> {
+  const resolvedBuildReportPath = resolve(buildReportPath);
   const buildReport = parseDistributionBuildReport(
-    JSON.parse(await readFile(buildReportPath, "utf8")) as unknown,
+    JSON.parse(await readFile(resolvedBuildReportPath, "utf8")) as unknown,
   );
   if (buildReport.runtimeArtifact == null) {
     throw new Error("Codex plugin build report does not contain a runtime artifact");
-  }
-  const environmentArtifact = parseCodexPluginEnvironmentArtifactBuild(
-    JSON.parse(await readFile(join(
-      dirname(buildReportPath),
-      "environment",
-      CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
-      "artifact.json",
-    ), "utf8")) as unknown,
-  );
-  const environmentBytes = await readFile(environmentArtifact.path);
-  const environmentDigest =
-    `sha256:${createHash("sha256").update(environmentBytes).digest("hex")}`;
-  if (
-    environmentBytes.byteLength !== environmentArtifact.size
-    || environmentDigest !== environmentArtifact.digest
-  ) {
-    throw new Error("Codex plugin environment artifact does not match its report");
   }
   const runtimeBytes = await readFile(buildReport.runtimeArtifact.path);
   const runtimeDigest =
@@ -115,119 +108,51 @@ export async function startCodexPluginFixtureServer(
   ) {
     throw new Error("Codex plugin runtime artifact does not match the build report");
   }
-  let info: CodexPluginFixtureReportV1 | null = null;
-  let environmentManifest: CodexPluginEnvironmentManifestV1 | null = null;
-  let manifest: CodexPluginAcquisitionManifestV1 | null = null;
-  const server = createServer((request, response) => {
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      response.statusCode = 405;
-      response.setHeader("allow", "GET, HEAD");
-      response.end();
-      return;
-    }
-    if (request.url === "/health") {
-      sendJson(response, {
-        identity: buildReport.identity,
-        ok: true,
-      });
-      return;
-    }
-    if (request.url === "/runtime") {
-      sendJson(response, {
-        identity: buildReport.identity,
-        runtime: {
-          digest: buildReport.identity.runtimeDigest,
-          protocolVersion: buildReport.identity.protocolVersion,
-          version: buildReport.identity.runtimeVersion,
-        },
-      });
-      return;
-    }
-    if (request.url === "/report" && info != null) {
-      sendJson(response, parseDistributionServeReport({
-        endpointUrl: info.endpointUrl,
-        healthUrl: info.healthUrl,
-        identity: info.identity,
-        schemaVersion: info.schemaVersion,
-      }));
-      return;
-    }
-    if (
-      (
-        request.url === "/runtime/manifest.json"
-        || request.url
-          === `/codex-plugin/${buildReport.identity.channel}/latest/runtime.json`
-      )
-      && manifest != null
-    ) {
-      sendJson(response, manifest);
-      return;
-    }
-    if (
-      request.url === `/codex-plugin/${buildReport.identity.channel}/latest/platforms/darwin-arm64.json`
-      && environmentManifest != null
-    ) {
-      sendJson(response, environmentManifest);
-      return;
-    }
-    if (
-      request.url
-        === `/codex-plugin/${buildReport.identity.channel}/versions/${environmentArtifact.version}/platforms/darwin-arm64/node`
-    ) {
-      response.statusCode = 200;
-      response.setHeader(
-        "content-type",
-        CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES.NODE_EXECUTABLE_V1,
+  return { buildReport, runtimeBytes };
+}
+
+function assertPromotionCoordinate(
+  initial: DistributionBuildReportV1,
+  promoted: DistributionBuildReportV1,
+): void {
+  const fixedKeys = [
+    "channel",
+    "namespace",
+    "protocolVersion",
+    "shellDigest",
+    "shellType",
+    "shellVersion",
+  ] as const;
+  for (const key of fixedKeys) {
+    if (initial.identity[key] !== promoted.identity[key]) {
+      throw new Error(
+        `Codex plugin fixture promotion changed fixed identity field ${key}`,
       );
-      response.setHeader("content-length", String(environmentBytes.byteLength));
-      response.end(request.method === "HEAD" ? undefined : environmentBytes);
-      return;
     }
-    if (
-      request.url === "/runtime/runtime.mjs"
-      || request.url
-        === `/codex-plugin/${buildReport.identity.channel}/versions/${buildReport.identity.runtimeVersion}/runtime/runtime.mjs`
-    ) {
-      response.statusCode = 200;
-      response.setHeader(
-        "content-type",
-        CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
-      );
-      response.setHeader("content-length", String(runtimeBytes.byteLength));
-      response.end(request.method === "HEAD" ? undefined : runtimeBytes);
-      return;
-    }
-    response.statusCode = 404;
-    response.end();
-  });
-  await listen(server, options.port ?? 0, host);
-  const origin = serverOrigin(server);
-  environmentManifest = parseCodexPluginEnvironmentManifest({
-    node: {
-      digest: environmentArtifact.digest,
-      mediaType: CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES.NODE_EXECUTABLE_V1,
-      size: environmentArtifact.size,
-      url:
-        `${origin}/codex-plugin/${buildReport.identity.channel}/versions/${environmentArtifact.version}/platforms/darwin-arm64/node`,
-      version: environmentArtifact.version,
-    },
-    platform: environmentArtifact.platform,
-    schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
-  });
-  manifest = parseCodexPluginAcquisitionManifest({
+  }
+}
+
+function createFixtureRelease(options: {
+  minimumShellVersion?: string;
+  origin: string;
+  payload: CodexPluginFixturePayload;
+}): CodexPluginFixtureRelease {
+  const { buildReport, runtimeBytes } = options.payload;
+  const artifactPath =
+    `/codex-plugin/${buildReport.identity.channel}/versions/${buildReport.identity.runtimeVersion}/runtime/runtime.mjs`;
+  const manifest = parseCodexPluginAcquisitionManifest({
     artifact: {
-      digest: buildReport.runtimeArtifact.digest,
-      entryPath: buildReport.runtimeArtifact.entryPath,
+      digest: buildReport.runtimeArtifact!.digest,
+      entryPath: buildReport.runtimeArtifact!.entryPath,
       mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
-      size: buildReport.runtimeArtifact.size,
-      url:
-        `${origin}/codex-plugin/${buildReport.identity.channel}/versions/${buildReport.identity.runtimeVersion}/runtime/runtime.mjs`,
+      size: buildReport.runtimeArtifact!.size,
+      url: `${options.origin}${artifactPath}`,
     },
     channel: buildReport.identity.channel,
     control: {
       codexPlugin: {
         version: {
-          min: buildReport.identity.shellVersion,
+          min: options.minimumShellVersion ?? buildReport.identity.shellVersion,
         },
       },
     },
@@ -237,22 +162,143 @@ export async function startCodexPluginFixtureServer(
     runtimeVersion: buildReport.identity.runtimeVersion,
     schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   });
-  info = parseCodexPluginFixtureReport({
-    endpointUrl: `${origin}/runtime`,
-    environmentManifestUrl:
-      `${origin}/codex-plugin/${buildReport.identity.channel}/latest/platforms/darwin-arm64.json`,
-    healthUrl: `${origin}/health`,
+  const info = parseCodexPluginFixtureReport({
+    endpointUrl: `${options.origin}/runtime`,
+    healthUrl: `${options.origin}/health`,
     identity: buildReport.identity,
     runtimeManifestUrl:
-      `${origin}/codex-plugin/${buildReport.identity.channel}/latest/runtime.json`,
+      `${options.origin}/codex-plugin/${buildReport.identity.channel}/latest/runtime.json`,
     schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
   });
   return {
+    artifactPath,
     buildReport,
-    close: () => close(server),
-    environmentArtifact,
-    environmentManifest,
     info,
     manifest,
+    runtimeBytes,
+  };
+}
+
+export async function startCodexPluginFixtureServer(
+  options: CodexPluginFixtureOptions,
+): Promise<CodexPluginFixtureServer> {
+  const host = options.host ?? "127.0.0.1";
+  assertLoopbackHost(host);
+  const initialPayload = await loadFixturePayload(options.buildReportPath);
+  let current: CodexPluginFixtureRelease | null = null;
+  const releases = new Map<string, CodexPluginFixtureRelease>();
+  const server = createServer((request, response) => {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      response.statusCode = 405;
+      response.setHeader("allow", "GET, HEAD");
+      response.end();
+      return;
+    }
+    if (request.url === "/health" && current != null) {
+      sendJson(response, {
+        identity: current.buildReport.identity,
+        ok: true,
+      });
+      return;
+    }
+    if (request.url === "/runtime" && current != null) {
+      sendJson(response, {
+        identity: current.buildReport.identity,
+        runtime: {
+          digest: current.buildReport.identity.runtimeDigest,
+          protocolVersion: current.buildReport.identity.protocolVersion,
+          version: current.buildReport.identity.runtimeVersion,
+        },
+      });
+      return;
+    }
+    if (request.url === "/report" && current != null) {
+      sendJson(response, parseDistributionServeReport({
+        endpointUrl: current.info.endpointUrl,
+        healthUrl: current.info.healthUrl,
+        identity: current.info.identity,
+        schemaVersion: current.info.schemaVersion,
+      }));
+      return;
+    }
+    if (
+      current != null
+      && (
+        request.url === "/runtime/manifest.json"
+        || request.url
+          === `/codex-plugin/${current.buildReport.identity.channel}/latest/runtime.json`
+      )
+    ) {
+      sendJson(response, current.manifest);
+      return;
+    }
+    const release = request.url === "/runtime/runtime.mjs"
+      ? current
+      : releases.get(request.url ?? "");
+    if (release != null) {
+      response.statusCode = 200;
+      response.setHeader(
+        "content-type",
+        CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
+      );
+      response.setHeader(
+        "content-length",
+        String(release.runtimeBytes.byteLength),
+      );
+      response.end(
+        request.method === "HEAD" ? undefined : release.runtimeBytes,
+      );
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await listen(server, options.port ?? 0, host);
+  const origin = serverOrigin(server);
+  current = createFixtureRelease({
+    minimumShellVersion: options.minimumShellVersion,
+    origin,
+    payload: initialPayload,
+  });
+  releases.set(current.artifactPath, current);
+  return {
+    get buildReport() {
+      return current!.buildReport;
+    },
+    close: () => close(server),
+    get info() {
+      return current!.info;
+    },
+    get manifest() {
+      return current!.manifest;
+    },
+    async promote(promotionOptions) {
+      const payload = await loadFixturePayload(
+        promotionOptions.buildReportPath,
+      );
+      assertPromotionCoordinate(initialPayload.buildReport, payload.buildReport);
+      const promoted = createFixtureRelease({
+        minimumShellVersion: promotionOptions.minimumShellVersion,
+        origin,
+        payload,
+      });
+      const existing = releases.get(promoted.artifactPath);
+      if (
+        existing != null
+        && (
+          existing.buildReport.runtimeArtifact!.digest
+            !== promoted.buildReport.runtimeArtifact!.digest
+          || existing.buildReport.runtimeArtifact!.size
+            !== promoted.buildReport.runtimeArtifact!.size
+        )
+      ) {
+        throw new Error(
+          `Codex plugin fixture promotion would replace immutable artifact ${promoted.artifactPath}`,
+        );
+      }
+      if (existing == null) releases.set(promoted.artifactPath, promoted);
+      current = promoted;
+      return promoted.info;
+    },
   };
 }

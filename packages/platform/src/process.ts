@@ -38,8 +38,10 @@ export type SpawnProcessRequest = CommandInvocationRequest & {
 
 export type ProcessSnapshot = {
   command: string;
+  executablePath?: string;
   pid: number;
   ppid: number;
+  startedAt?: string;
 };
 
 export type StampedProcessMatchCriteria<TStamp extends ProcessStampShape> = Partial<TStamp>;
@@ -92,8 +94,10 @@ export function processCommandExactlyRunsExecutable(
 
 type WindowsProcessRecord = {
   CommandLine?: string | null;
+  ExecutablePath?: string | null;
   ParentProcessId?: number | string | null;
   ProcessId?: number | string | null;
+  StartedAt?: string | null;
 };
 
 /** @internal Extract a Node `error.code` as a string, or `null` when the value carries no code. */
@@ -348,7 +352,7 @@ async function listPosixProcessSnapshots(): Promise<ProcessSnapshot[]> {
 async function listWindowsProcessSnapshots(): Promise<ProcessSnapshot[]> {
   const command = [
     "$ErrorActionPreference = 'Stop'",
-    "Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, CommandLine | ConvertTo-Json -Compress",
+    "Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, CommandLine, ExecutablePath, @{Name='StartedAt';Expression={ if ($_.CreationDate -ne $null) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null } }} | ConvertTo-Json -Compress",
   ].join("; ");
   const stdout = await new Promise<string>((resolveList, rejectList) => {
     execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", command], { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }, (error, out) => {
@@ -365,7 +369,17 @@ async function listWindowsProcessSnapshots(): Promise<ProcessSnapshot[]> {
       const ppid = Number(record.ParentProcessId);
       const commandLine = record.CommandLine?.trim();
       if (!commandLine || Number.isNaN(pid) || Number.isNaN(ppid)) return null;
-      return { command: commandLine, pid, ppid };
+      const executablePath = record.ExecutablePath?.trim();
+      const startedAt = record.StartedAt?.trim();
+      return {
+        command: commandLine,
+        ...(executablePath == null || executablePath.length === 0
+          ? {}
+          : { executablePath }),
+        pid,
+        ppid,
+        ...(startedAt == null || startedAt.length === 0 ? {} : { startedAt }),
+      };
     })
     .filter((snapshot): snapshot is ProcessSnapshot => snapshot != null);
 }

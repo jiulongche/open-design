@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import {
   parseCodexPluginAcquisitionManifest,
@@ -18,9 +18,6 @@ import { startCodexPluginFixtureServer } from "../src/codex-plugin-fixture.js";
 const RUNTIME_BYTES = Buffer.from("export {};\n");
 const RUNTIME_DIGEST =
   `sha256:${createHash("sha256").update(RUNTIME_BYTES).digest("hex")}`;
-const NODE_BYTES = Buffer.from("#!/bin/sh\necho v24.14.0\n");
-const NODE_DIGEST =
-  `sha256:${createHash("sha256").update(NODE_BYTES).digest("hex")}`;
 const IDENTITY = {
   channel: "beta",
   namespace: "codex-smoke",
@@ -32,26 +29,24 @@ const IDENTITY = {
   shellVersion: "0.1.0",
 } as const;
 
-async function writeBuildReport(): Promise<string> {
+async function writeBuildReport(options: {
+  runtimeBytes?: Buffer;
+  runtimeVersion?: string;
+} = {}): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "open-design-codex-plugin-serve-"));
   const shellRoot = join(root, "marketplace", "plugins", "open-design");
   const runtimePath = join(root, "runtime", "runtime.mjs");
-  const nodePath = join(root, "environment", "darwin-arm64", "node");
+  const runtimeBytes = options.runtimeBytes ?? RUNTIME_BYTES;
+  const runtimeDigest =
+    `sha256:${createHash("sha256").update(runtimeBytes).digest("hex")}`;
+  const identity = {
+    ...IDENTITY,
+    runtimeDigest,
+    runtimeVersion: options.runtimeVersion ?? IDENTITY.runtimeVersion,
+  };
   await mkdir(join(shellRoot, ".codex-plugin"), { recursive: true });
   await mkdir(join(root, "runtime"), { recursive: true });
-  await mkdir(dirname(nodePath), { recursive: true });
-  await writeFile(runtimePath, RUNTIME_BYTES);
-  await writeFile(nodePath, NODE_BYTES);
-  await writeFile(
-    join(dirname(nodePath), "artifact.json"),
-    JSON.stringify({
-      digest: NODE_DIGEST,
-      path: nodePath,
-      platform: "darwin-arm64",
-      size: NODE_BYTES.byteLength,
-      version: "24.14.0",
-    }),
-  );
+  await writeFile(runtimePath, runtimeBytes);
   const path = join(root, "build-report.json");
   await writeFile(path, JSON.stringify({
     artifact: {
@@ -59,17 +54,17 @@ async function writeBuildReport(): Promise<string> {
       files: [".codex-plugin/plugin.json"],
       size: 1,
     },
-    identity: IDENTITY,
+    identity,
     paths: {
       artifactRoot: join(root, "marketplace"),
       manifestPath: join(shellRoot, ".codex-plugin", "plugin.json"),
       shellRoot,
     },
     runtimeArtifact: {
-      digest: RUNTIME_DIGEST,
+      digest: runtimeDigest,
       entryPath: "runtime.mjs",
       path: runtimePath,
-      size: RUNTIME_BYTES.byteLength,
+      size: runtimeBytes.byteLength,
     },
     schemaVersion: 1,
   }));
@@ -83,18 +78,6 @@ describe("Codex plugin fixture", () => {
     });
     try {
       expect(parseCodexPluginFixtureReport(server.info)).toEqual(server.info);
-      expect(server.info.environmentManifestUrl).toContain(
-        "/codex-plugin/beta/latest/platforms/darwin-arm64.json",
-      );
-      const environmentManifest = await (
-        await fetch(server.info.environmentManifestUrl)
-      ).json() as {
-        node?: { url?: string; version?: string };
-      };
-      expect(environmentManifest.node?.version).toBe("24.14.0");
-      expect(Buffer.from(
-        await (await fetch(environmentManifest.node!.url!)).arrayBuffer(),
-      )).toEqual(NODE_BYTES);
       const report = parseDistributionServeReport(
         await (await fetch(server.info.endpointUrl.replace("/runtime", "/report"))).json(),
       );
@@ -135,6 +118,62 @@ describe("Codex plugin fixture", () => {
     } finally {
       await first.close();
       await second.close();
+    }
+  });
+
+  it("atomically promotes latest runtime while retaining immutable artifacts", async () => {
+    const firstBytes = Buffer.from("export const fixture = 1;\n");
+    const secondBytes = Buffer.from("export const fixture = 2;\n");
+    const thirdBytes = Buffer.from("export const fixture = 3;\n");
+    const server = await startCodexPluginFixtureServer({
+      buildReportPath: await writeBuildReport({
+        runtimeBytes: firstBytes,
+        runtimeVersion: "0.16.1-beta.1",
+      }),
+    });
+    try {
+      const manifestUrl = server.info.runtimeManifestUrl;
+      const firstManifest = parseCodexPluginAcquisitionManifest(
+        await (await fetch(manifestUrl)).json(),
+      );
+      const promotedInfo = await server.promote({
+        buildReportPath: await writeBuildReport({
+          runtimeBytes: secondBytes,
+          runtimeVersion: "0.16.2-beta.1",
+        }),
+      });
+      const secondManifest = parseCodexPluginAcquisitionManifest(
+        await (await fetch(manifestUrl)).json(),
+      );
+
+      expect(promotedInfo.runtimeManifestUrl).toBe(manifestUrl);
+      expect(secondManifest.runtimeVersion).toBe("0.16.2-beta.1");
+      expect(Buffer.from(
+        await (await fetch(firstManifest.artifact.url)).arrayBuffer(),
+      )).toEqual(firstBytes);
+      expect(Buffer.from(
+        await (await fetch(secondManifest.artifact.url)).arrayBuffer(),
+      )).toEqual(secondBytes);
+
+      await expect(server.promote({
+        buildReportPath: await writeBuildReport({
+          runtimeBytes: thirdBytes,
+          runtimeVersion: "0.16.2-beta.1",
+        }),
+      })).rejects.toThrow("would replace immutable artifact");
+
+      await server.promote({
+        buildReportPath: await writeBuildReport({
+          runtimeBytes: thirdBytes,
+          runtimeVersion: "0.16.3-beta.1",
+        }),
+        minimumShellVersion: "0.2.0",
+      });
+      expect(parseCodexPluginAcquisitionManifest(
+        await (await fetch(manifestUrl)).json(),
+      ).control.codexPlugin.version.min).toBe("0.2.0");
+    } finally {
+      await server.close();
     }
   });
 });

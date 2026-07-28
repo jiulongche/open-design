@@ -11,8 +11,10 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  WINDOWS_CODEX_PLUGIN_COMMAND_MAX_PATH_LENGTH,
+  assertCodexPluginCacheCommandPathSupported,
   classifyToolCodexAcceptance,
-  extractObservedIdentity,
+  inspectToolCodexDesktopScreenshot,
   parseToolCodexDesktopUiObservation,
   verifyToolCodexArtifact,
   type ToolCodexAcceptanceSignals,
@@ -36,10 +38,16 @@ const HOST: ToolCodexStatus = {
   },
   desktop: {
     appPath: "/Applications/Codex.app",
+    applicationId: null,
+    aumid: null,
     available: true,
     controlled: true,
+    executablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    packageFamilyName: null,
+    packageFullName: null,
     roots: [{
       command: "/Applications/Codex.app/Contents/MacOS/ChatGPT",
+      executablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT",
       pid: 1,
       ppid: 0,
     }],
@@ -50,6 +58,7 @@ const HOST: ToolCodexStatus = {
   namespace: "desktop-smoke",
   paths: {
     codexHome: "/managed/codex-home",
+    desktopUserDataPath: "/managed/desktop-user-data",
     namespaceRoot: "/managed",
     stateRoot: "/state",
   },
@@ -59,11 +68,9 @@ const HOST: ToolCodexStatus = {
 
 const SIGNALS: ToolCodexAcceptanceSignals = {
   artifactValid: true,
-  automatedInvocation: true,
   desktopControlled: true,
-  desktopHostLoaded: true,
   desktopRunning: true,
-  desktopUiObserved: null,
+  desktopUiObserved: true,
   loggedIn: true,
   marketplaceConfigured: true,
   pluginInstalled: true,
@@ -71,16 +78,37 @@ const SIGNALS: ToolCodexAcceptanceSignals = {
 };
 
 describe("tools-codex acceptance", () => {
-  it("passes with exact host-load and same-home invocation evidence", () => {
+  it("fails before install when the Windows plugin carrier path exceeds MAX_PATH", () => {
+    expect(assertCodexPluginCacheCommandPathSupported({
+      codexHome: "C:\\od",
+      commandEntry: "bin/node.exe",
+      marketplaceName: "open-design-smoke-win32-x64",
+      platform: "win32",
+      shellVersion: "0.1.0+w1",
+    })).toBe(
+      "C:\\od\\plugins\\cache\\open-design-smoke-win32-x64\\open-design\\0.1.0+w1\\bin\\node.exe",
+    );
+
+    const codexHome = `C:\\${"a".repeat(
+      WINDOWS_CODEX_PLUGIN_COMMAND_MAX_PATH_LENGTH,
+    )}`;
+    expect(() => assertCodexPluginCacheCommandPathSupported({
+      codexHome,
+      commandEntry: "bin/node.exe",
+      marketplaceName: "open-design-smoke-win32-x64",
+      platform: "win32",
+      shellVersion: "0.1.0+codex.local-20260728-155035",
+    })).toThrowError(expect.objectContaining({
+      code: "WINDOWS_PLUGIN_CACHE_PATH_TOO_LONG",
+    }));
+  });
+
+  it("requires operator-confirmed Desktop screenshot evidence", () => {
     expect(classifyToolCodexAcceptance(SIGNALS, HOST)).toBe("PASS");
     expect(classifyToolCodexAcceptance({
       ...SIGNALS,
-      automatedInvocation: null,
+      desktopUiObserved: null,
     }, HOST)).toBe("OPERATOR_ACTION_REQUIRED");
-    expect(classifyToolCodexAcceptance({
-      ...SIGNALS,
-      desktopUiObserved: true,
-    }, HOST)).toBe("PASS");
     expect(classifyToolCodexAcceptance({
       ...SIGNALS,
       desktopUiObserved: false,
@@ -100,21 +128,21 @@ describe("tools-codex acceptance", () => {
     }, HOST)).toBe("FAIL");
   });
 
-  it("extracts identity from a tool result envelope", () => {
-    const identity = { channel: "stable" };
-    expect(extractObservedIdentity({
-      result: { structured_content: { identity } },
-    })).toEqual(identity);
-  });
-
-  it("requires explicit run provenance for optional Desktop UI evidence", () => {
+  it("requires explicit operator, screenshot, outcome, and run provenance", () => {
     expect(parseToolCodexDesktopUiObservation({
       capturedAt: "2026-07-27T12:00:00.000Z",
+      outcome: "PASS",
       provenance: {
         kind: "operator-captured-desktop-ui",
+        operator: "Nexu",
         runId: "run-123",
       },
-      schemaVersion: 1,
+      schemaVersion: 2,
+      screenshot: {
+        mediaType: "image/png",
+        path: "desktop.png",
+        sha256: `sha256:${"c".repeat(64)}`,
+      },
       server: "open-design",
       structuredContent: {
         identity: {
@@ -127,11 +155,18 @@ describe("tools-codex acceptance", () => {
     });
     expect(parseToolCodexDesktopUiObservation({
       capturedAt: "2026-07-27T12:00:00.000Z",
+      outcome: "PASS",
       provenance: {
         kind: "operator-captured-desktop-ui",
+        operator: "Nexu",
         runId: "run-123",
       },
-      schemaVersion: 1,
+      schemaVersion: 2,
+      screenshot: {
+        mediaType: "image/png",
+        path: "desktop.png",
+        sha256: `sha256:${"d".repeat(64)}`,
+      },
       server: "open-design",
       structuredContent: {
         identity: {
@@ -147,6 +182,39 @@ describe("tools-codex acceptance", () => {
     })).toThrowError(expect.objectContaining({
       code: "DESKTOP_UI_OBSERVATION_INVALID",
     }));
+  });
+
+  it("binds Desktop evidence to a regular PNG and its exact digest", async () => {
+    const root = await mkdtemp(join(tmpdir(), "open-design-tools-codex-ui-"));
+    roots.push(root);
+    const screenshotPath = join(root, "desktop.png");
+    const png = Buffer.alloc(33);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+      .copy(png);
+    png.writeUInt32BE(13, 8);
+    Buffer.from("IHDR").copy(png, 12);
+    png.writeUInt32BE(1, 16);
+    png.writeUInt32BE(1, 20);
+    await writeFile(screenshotPath, png);
+    const digest =
+      `sha256:${createHash("sha256").update(png).digest("hex")}`;
+
+    await expect(inspectToolCodexDesktopScreenshot(
+      screenshotPath,
+      digest,
+    )).resolves.toMatchObject({
+      matches: true,
+      mediaType: "image/png",
+      path: screenshotPath,
+      sha256: digest,
+      size: png.byteLength,
+    });
+    await expect(inspectToolCodexDesktopScreenshot(
+      screenshotPath,
+      `sha256:${"0".repeat(64)}`,
+    )).resolves.toMatchObject({
+      matches: false,
+    });
   });
 
   it("detects packed artifact drift before Desktop acceptance", async () => {

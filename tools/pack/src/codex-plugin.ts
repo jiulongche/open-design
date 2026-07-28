@@ -15,8 +15,8 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   CODEX_PLUGIN_PLATFORM_TARGETS,
   CODEX_PLUGIN_RUNTIME_ENV,
-  parseCodexPluginEnvironmentArtifactBuild,
-  type CodexPluginEnvironmentArtifactBuildV1,
+  normalizeCodexPluginPlatformTarget,
+  type CodexPluginPlatformTarget,
 } from "@open-design/codex-plugin-proto";
 import {
   DISTRIBUTION_REPORT_SCHEMA_VERSION,
@@ -36,10 +36,11 @@ import { createPackageManagerInvocation } from "@open-design/platform";
 import { WORKSPACE_ROOT } from "./config.js";
 
 export type CodexPluginBuildOptions = {
+  carrierPath?: string;
   channel?: string;
   dir?: string;
   namespace?: string;
-  nodePath?: string;
+  platform?: string;
   protocolVersion?: string | number;
   runtimeDigest?: string;
   runtimeVersion?: string;
@@ -51,8 +52,8 @@ export type CodexPluginBuildOptions = {
 const DEFAULT_NAMESPACE = "codex-local";
 const DEFAULT_PROTOCOL_VERSION = 1;
 const RUNTIME_ENTRY_PATH = "runtime.mjs";
-const DARWIN_ARM64_NODE_PATH =
-  "/Applications/Codex.app/Contents/Resources/cua_node/bin/node";
+const MCP_STARTUP_TIMEOUT_SECONDS = 10;
+const MCP_TOOL_TIMEOUT_SECONDS = 120;
 
 function parsePositiveInteger(value: string | number | undefined, label: string): number {
   if (value == null || value === "") return DEFAULT_PROTOCOL_VERSION;
@@ -128,66 +129,85 @@ async function runCapture(
   });
 }
 
-async function resolveDarwinArm64NodePath(
+function hostPlatformTarget(
+  platform = process.platform,
+  architecture = process.arch,
+): CodexPluginPlatformTarget | null {
+  if (platform === "darwin" && architecture === "arm64") {
+    return CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64;
+  }
+  if (platform === "win32" && architecture === "x64") {
+    return CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64;
+  }
+  return null;
+}
+
+function platformCarrierEntryPath(target: CodexPluginPlatformTarget): string {
+  return target === CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64
+    ? "bin/node.exe"
+    : "bin/node";
+}
+
+function resolvePlatformTarget(
+  explicitTarget: string | undefined,
+): CodexPluginPlatformTarget {
+  if (explicitTarget != null && explicitTarget.length > 0) {
+    return normalizeCodexPluginPlatformTarget(explicitTarget);
+  }
+  const target = hostPlatformTarget();
+  if (target == null) {
+    throw new Error(
+      `Codex plugin build requires --platform on unsupported host ${process.platform}-${process.arch}`,
+    );
+  }
+  return target;
+}
+
+async function resolveCarrierPath(
+  target: CodexPluginPlatformTarget,
   explicitPath: string | undefined,
-): Promise<string | null> {
-  const candidate = explicitPath == null
-    ? process.platform === "darwin" && process.arch === "arm64"
-      ? DARWIN_ARM64_NODE_PATH
-      : null
-    : resolve(explicitPath);
-  if (candidate == null) return null;
+): Promise<string> {
+  const currentTarget = hostPlatformTarget();
+  if (currentTarget !== target) {
+    throw new Error(
+      `Codex plugin ${target} artifacts must be built on a ${target} host; current host is ${process.platform}-${process.arch}`,
+    );
+  }
+  const candidate = explicitPath == null ? process.execPath : resolve(explicitPath);
   const info = await stat(candidate).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT" && explicitPath == null) return null;
     throw error;
   });
-  if (info == null) return null;
   if (!info.isFile() || info.size === 0) {
-    throw new Error(`Codex plugin Node artifact is not a regular file: ${candidate}`);
+    throw new Error(`Codex plugin execution carrier is not a regular file: ${candidate}`);
   }
-  const [versionOutput, architecture] = await Promise.all([
+  const [versionOutput, observedTarget] = await Promise.all([
     runCapture(candidate, ["--version"]),
-    runCapture(candidate, ["-p", "process.arch"]),
+    runCapture(candidate, ["-p", "process.platform + '-' + process.arch"]),
   ]);
   if (!/^v24\.\d+\.\d+$/.test(versionOutput)) {
-    throw new Error(`Codex plugin Node artifact must be Node 24: ${versionOutput}`);
+    throw new Error(`Codex plugin execution carrier must be Node 24: ${versionOutput}`);
   }
-  if (architecture !== "arm64") {
-    throw new Error(`Codex plugin Node artifact must be arm64: ${architecture}`);
+  if (observedTarget !== target) {
+    throw new Error(
+      `Codex plugin execution carrier target mismatch: expected ${target}; got ${observedTarget}`,
+    );
   }
   return candidate;
 }
 
-async function packCodexPluginEnvironment(options: {
-  namespaceRoot: string;
-  nodePath: string | undefined;
-}): Promise<CodexPluginEnvironmentArtifactBuildV1> {
-  const sourcePath = await resolveDarwinArm64NodePath(options.nodePath);
-  if (sourcePath == null) {
-    throw new Error(
-      "Codex plugin build requires a macOS arm64 Node 24 artifact; run on Apple Silicon with Codex installed or pass --node-path",
-    );
-  }
+async function packCodexPluginCarrier(options: {
+  carrierPath: string | undefined;
+  shellRoot: string;
+  target: CodexPluginPlatformTarget;
+}): Promise<{ entryPath: string; version: string }> {
+  const sourcePath = await resolveCarrierPath(options.target, options.carrierPath);
   const version = (await runCapture(sourcePath, ["--version"])).slice(1);
-  const targetPath = join(
-    options.namespaceRoot,
-    "environment",
-    CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
-    "node",
-  );
+  const entryPath = platformCarrierEntryPath(options.target);
+  const targetPath = join(options.shellRoot, ...entryPath.split("/"));
   await mkdir(dirname(targetPath), { recursive: true });
   await cp(sourcePath, targetPath);
   await chmod(targetPath, 0o700);
-  const bytes = await readFile(targetPath);
-  const report = parseCodexPluginEnvironmentArtifactBuild({
-    digest: digestBytes(bytes),
-    path: targetPath,
-    platform: CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
-    size: bytes.byteLength,
-    version,
-  });
-  await writeJson(join(dirname(targetPath), "artifact.json"), report);
-  return report;
+  return { entryPath, version };
 }
 
 function assertWithinRoot(root: string, target: string, label: string): void {
@@ -240,20 +260,52 @@ async function readPackageVersion(path: string): Promise<string> {
   return normalizeDistributionVersion(payload.version, "Codex plugin package version");
 }
 
-export function codexMarketplaceName(namespace: string): string {
+export function codexMarketplaceName(
+  namespace: string,
+  target: CodexPluginPlatformTarget,
+): string {
   const normalized = normalizeDistributionNamespace(namespace);
   const portable = normalized.replaceAll(".", "-");
-  if (portable === normalized) return `open-design-${portable}`;
+  if (portable === normalized) return `open-design-${portable}-${target}`;
   const suffix = createHash("sha256").update(normalized).digest("hex").slice(0, 8);
-  return `open-design-${portable}-${suffix}`;
+  return `open-design-${portable}-${target}-${suffix}`;
 }
 
-export function codexRuntimeFixtureSource(): string {
+function codexPluginMcpConfig(
+  target: CodexPluginPlatformTarget,
+): Record<string, unknown> {
+  return {
+    mcpServers: {
+      "open-design": {
+        args: [
+          "./mcp/server.mjs",
+          "--identity-file",
+          "./distribution.json",
+        ],
+        command: `./${platformCarrierEntryPath(target)}`,
+        cwd: ".",
+        description:
+          "Expose the Open Design distribution identity and runtime bridge.",
+        env_vars: [
+          "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
+          "OD_DATA_DIR",
+          "OD_DISTRIBUTION_CHANNEL_ROOT",
+        ],
+        startup_timeout_sec: MCP_STARTUP_TIMEOUT_SECONDS,
+        title: "Open Design",
+        tool_timeout_sec: MCP_TOOL_TIMEOUT_SECONDS,
+      },
+    },
+  };
+}
+
+export function codexRuntimeFixtureSource(runtimeVersion: string): string {
   return `import { createHash } from "node:crypto";
 import { rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
 const env = ${JSON.stringify(CODEX_PLUGIN_RUNTIME_ENV)};
+const packedRuntimeVersion = ${JSON.stringify(runtimeVersion)};
 const identity = {
   channel: process.env[env.CHANNEL],
   namespace: process.env[env.NAMESPACE],
@@ -261,6 +313,9 @@ const identity = {
   runtimeDigest: process.env[env.RUNTIME_DIGEST],
   runtimeVersion: process.env[env.RUNTIME_VERSION],
 };
+if (identity.runtimeVersion !== packedRuntimeVersion) {
+  process.exit(1);
+}
 const idleMs = 15 * 60 * 1000;
 let idleTimer;
 const shutdown = () => server.close(() => process.exit(0));
@@ -327,6 +382,7 @@ export async function packCodexPlugin(
     options.protocolVersion,
     "protocol version",
   );
+  const platform = resolvePlatformTarget(options.platform);
   const toolRoot = resolve(options.dir ?? join(workspaceRoot, ".tmp", "tools-pack"));
   const namespaceRoot = join(
     toolRoot,
@@ -334,6 +390,7 @@ export async function packCodexPlugin(
     "codex-plugin",
     "namespaces",
     namespace,
+    platform,
   );
   const artifactRoot = join(namespaceRoot, "marketplace");
   const runtimeRoot = join(namespaceRoot, "runtime");
@@ -341,7 +398,7 @@ export async function packCodexPlugin(
   const shellRoot = join(artifactRoot, "plugins", "open-design");
   const manifestPath = join(shellRoot, ".codex-plugin", "plugin.json");
   const buildReportPath = join(namespaceRoot, "build-report.json");
-  const marketplaceName = codexMarketplaceName(namespace);
+  const marketplaceName = codexMarketplaceName(namespace, platform);
   assertWithinRoot(toolRoot, namespaceRoot, "Codex plugin namespace root");
 
   if (options.skipAppBuild !== true) await runAppBuild(workspaceRoot);
@@ -351,7 +408,10 @@ export async function packCodexPlugin(
   }
 
   await rm(namespaceRoot, { force: true, recursive: true });
-  const runtimeBytes = Buffer.from(codexRuntimeFixtureSource(), "utf8");
+  const runtimeBytes = Buffer.from(
+    codexRuntimeFixtureSource(runtimeVersion),
+    "utf8",
+  );
   const runtimeDigest = digestBytes(runtimeBytes);
   if (options.runtimeDigest != null && options.runtimeDigest.length > 0) {
     const expectedRuntimeDigest = normalizeDistributionDigest(
@@ -368,12 +428,15 @@ export async function packCodexPlugin(
   await writeFile(runtimeArtifactPath, runtimeBytes, { mode: 0o700 });
   await mkdir(shellRoot, { recursive: true });
   await cp(sourceShellRoot, shellRoot, { recursive: true });
+  await rm(join(shellRoot, "bootstrap.sh"), { force: true });
   await mkdir(join(shellRoot, "mcp"), { recursive: true });
   await cp(builtServerPath, join(shellRoot, "mcp", "server.mjs"));
-  await packCodexPluginEnvironment({
-    namespaceRoot,
-    nodePath: options.nodePath,
+  await packCodexPluginCarrier({
+    carrierPath: options.carrierPath,
+    shellRoot,
+    target: platform,
   });
+  await writeJson(join(shellRoot, ".mcp.json"), codexPluginMcpConfig(platform));
 
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
   manifest.version = shellVersion;
@@ -381,7 +444,7 @@ export async function packCodexPlugin(
 
   await writeJson(join(artifactRoot, ".agents", "plugins", "marketplace.json"), {
     interface: {
-      displayName: "Open Design Local",
+      displayName: `Open Design Local (${platform})`,
     },
     name: marketplaceName,
     plugins: [

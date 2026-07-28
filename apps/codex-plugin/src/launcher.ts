@@ -8,7 +8,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, toNamespacedPath } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import {
@@ -66,12 +66,19 @@ type RuntimeSession = {
   child: ChildProcess | null;
 };
 
+const RUNTIME_LEASE_ATTACH_TIMEOUT_MS = 15_000;
+const RUNTIME_LEASE_POLL_INTERVAL_MS = 250;
+
 function opaqueId(prefix: string): string {
   return `${prefix}_${randomBytes(18).toString("base64url")}`;
 }
 
 function tokenDigest(token: string): string {
   return `sha256:${createHash("sha256").update(token).digest("hex")}`;
+}
+
+function spawnFilesystemPath(path: string): string {
+  return process.platform === "win32" ? toNamespacedPath(path) : path;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -267,6 +274,66 @@ async function acquireRuntimeLease(options: {
   return lease;
 }
 
+async function acquireRuntimeLeaseOrAttach(options: {
+  channel: DistributionRuntimeIdentityV1["channel"];
+  expected: DistributionRuntimeIdentityV1;
+  fetchImpl: typeof fetch;
+  leasePath: string;
+  lockRoot: string;
+  namespace: string;
+  bindingPath: string;
+}): Promise<
+  | { binding: DistributionRuntimeBindingV1; lease: null }
+  | { binding: null; lease: DistributionRuntimeLeaseV1 }
+> {
+  const deadline = Date.now() + RUNTIME_LEASE_ATTACH_TIMEOUT_MS;
+  while (true) {
+    const binding = await readCompatibleBinding({
+      expected: options.expected,
+      fetchImpl: options.fetchImpl,
+      path: options.bindingPath,
+    });
+    if (binding != null) return { binding, lease: null };
+    try {
+      return {
+        binding: null,
+        lease: await acquireRuntimeLease({
+          channel: options.channel,
+          leasePath: options.leasePath,
+          lockRoot: options.lockRoot,
+          namespace: options.namespace,
+        }),
+      };
+    } catch (error) {
+      if (
+        !(error instanceof CodexPluginLauncherError)
+        || !["RUNTIME_BUSY", "RUNTIME_LEASE_EXPIRED", "RUNTIME_LOCK_UNKNOWN"]
+          .includes(error.code)
+      ) {
+        throw error;
+      }
+      const leaseRaw = await readJsonIfExists(options.leasePath);
+      if (leaseRaw != null) {
+        const lease = parseDistributionRuntimeLease(leaseRaw);
+        if (
+          isDistributionRuntimeLeaseExpired(lease)
+          && !isProcessAlive(lease.owner.pid)
+        ) {
+          await rm(options.lockRoot, { force: true, recursive: true });
+          continue;
+        }
+      }
+      if (Date.now() >= deadline) {
+        throw new CodexPluginLauncherError(
+          "RUNTIME_BUSY",
+          `runtime acquisition did not publish a compatible binding within ${RUNTIME_LEASE_ATTACH_TIMEOUT_MS}ms`,
+        );
+      }
+      await sleep(RUNTIME_LEASE_POLL_INTERVAL_MS);
+    }
+  }
+}
+
 async function releaseRuntimeLease(options: {
   lease: DistributionRuntimeLeaseV1;
   leasePath: string;
@@ -394,22 +461,37 @@ async function waitForRuntimeReady(
   child: ChildProcess,
   timeoutMs: number,
 ): Promise<ReturnType<typeof parseCodexPluginRuntimeReady>> {
+  const spawnFailure: { error: Error | null } = { error: null };
+  const onSpawnError = (error: Error) => {
+    spawnFailure.error = error;
+  };
+  child.once("error", onSpawnError);
   const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const raw = await readJsonIfExists(path);
-    if (raw != null) return parseCodexPluginRuntimeReady(raw);
-    if (child.pid == null || !isProcessAlive(child.pid)) {
-      throw new CodexPluginLauncherError(
-        "RUNTIME_EXITED_EARLY",
-        "runtime exited before writing its ready handoff",
-      );
+  try {
+    while (Date.now() - startedAt < timeoutMs) {
+      const raw = await readJsonIfExists(path);
+      if (raw != null) return parseCodexPluginRuntimeReady(raw);
+      if (spawnFailure.error != null) {
+        throw new CodexPluginLauncherError(
+          "RUNTIME_SPAWN_FAILED",
+          `runtime process failed to spawn: ${spawnFailure.error.message}`,
+        );
+      }
+      if (child.pid == null || !isProcessAlive(child.pid)) {
+        throw new CodexPluginLauncherError(
+          "RUNTIME_EXITED_EARLY",
+          "runtime exited before writing its ready handoff",
+        );
+      }
+      await sleep(50);
     }
-    await sleep(50);
+    throw new CodexPluginLauncherError(
+      "RUNTIME_READY_TIMEOUT",
+      `runtime did not become ready within ${timeoutMs}ms`,
+    );
+  } finally {
+    child.off("error", onSpawnError);
   }
-  throw new CodexPluginLauncherError(
-    "RUNTIME_READY_TIMEOUT",
-    `runtime did not become ready within ${timeoutMs}ms`,
-  );
 }
 
 async function stopFailedRuntime(child: ChildProcess): Promise<void> {
@@ -534,12 +616,26 @@ export class CodexPluginRuntimeLauncher {
       };
     }
 
-    const lease = await acquireRuntimeLease({
+    const acquisition = await acquireRuntimeLeaseOrAttach({
+      bindingPath: storePaths.bindingPath,
       channel: expected.channel,
+      expected,
+      fetchImpl: this.fetchImpl,
       leasePath: storePaths.leasePath,
       lockRoot: storePaths.lockRoot,
       namespace: expected.namespace,
     });
+    if (acquisition.binding != null) {
+      this.session = { binding: acquisition.binding, child: null };
+      return {
+        attached: true,
+        binding: acquisition.binding,
+        handoff: null,
+        manifest,
+        reusedArtifact: true,
+      };
+    }
+    const lease = acquisition.lease;
     let child: ChildProcess | null = null;
     const handoffId = opaqueId("handoff");
     const resumeToken = randomBytes(32).toString("base64url");
@@ -602,25 +698,29 @@ export class CodexPluginRuntimeLauncher {
       });
       await writeJsonAtomic(handoffPath, handoff);
 
-      child = spawn(process.execPath, [acquired.entryPath], {
-        cwd: dirname(acquired.entryPath),
-        detached: true,
-        env: {
-          ...process.env,
-          [CODEX_PLUGIN_RUNTIME_ENV.CHANNEL]: expected.channel,
-          [CODEX_PLUGIN_RUNTIME_ENV.DATA_ROOT]: this.suitePaths.dataRoot,
-          [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_ID]: handoffId,
-          [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_TOKEN]: resumeToken,
-          [CODEX_PLUGIN_RUNTIME_ENV.NAMESPACE]: expected.namespace,
-          [CODEX_PLUGIN_RUNTIME_ENV.PROTOCOL_VERSION]:
-            expected.protocolVersion.toString(),
-          [CODEX_PLUGIN_RUNTIME_ENV.READY_PATH]: readyPath,
-          [CODEX_PLUGIN_RUNTIME_ENV.RUNTIME_DIGEST]: expected.runtimeDigest,
-          [CODEX_PLUGIN_RUNTIME_ENV.RUNTIME_VERSION]: expected.runtimeVersion,
+      child = spawn(
+        spawnFilesystemPath(process.execPath),
+        [acquired.entryPath],
+        {
+          cwd: spawnFilesystemPath(dirname(acquired.entryPath)),
+          detached: true,
+          env: {
+            ...process.env,
+            [CODEX_PLUGIN_RUNTIME_ENV.CHANNEL]: expected.channel,
+            [CODEX_PLUGIN_RUNTIME_ENV.DATA_ROOT]: this.suitePaths.dataRoot,
+            [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_ID]: handoffId,
+            [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_TOKEN]: resumeToken,
+            [CODEX_PLUGIN_RUNTIME_ENV.NAMESPACE]: expected.namespace,
+            [CODEX_PLUGIN_RUNTIME_ENV.PROTOCOL_VERSION]:
+              expected.protocolVersion.toString(),
+            [CODEX_PLUGIN_RUNTIME_ENV.READY_PATH]: readyPath,
+            [CODEX_PLUGIN_RUNTIME_ENV.RUNTIME_DIGEST]: expected.runtimeDigest,
+            [CODEX_PLUGIN_RUNTIME_ENV.RUNTIME_VERSION]: expected.runtimeVersion,
+          },
+          stdio: "ignore",
+          windowsHide: true,
         },
-        stdio: "ignore",
-        windowsHide: true,
-      });
+      );
       const ready = await waitForRuntimeReady(readyPath, child, 45_000)
         .finally(async () => {
           await rm(readyPath, { force: true });

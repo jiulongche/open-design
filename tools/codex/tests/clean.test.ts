@@ -13,8 +13,13 @@ const inspectToolCodexEnvironment = vi.hoisted(() => vi.fn(async () => ({
   },
   desktop: {
     appPath: "/Applications/Codex.app",
+    applicationId: null,
+    aumid: null,
     available: true,
     controlled: false,
+    executablePath: "/Applications/Codex.app/Contents/MacOS/ChatGPT",
+    packageFamilyName: null,
+    packageFullName: null,
     roots: [],
     version: "26.721.41059",
   },
@@ -23,6 +28,7 @@ const inspectToolCodexEnvironment = vi.hoisted(() => vi.fn(async () => ({
   namespace: "desktop-smoke",
   paths: {
     codexHome: "/managed/codex-home",
+    desktopUserDataPath: "/managed/desktop-user-data",
     namespaceRoot: "/managed",
     stateRoot: "/state",
   },

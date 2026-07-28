@@ -1,24 +1,59 @@
 import {
-  chmod,
   mkdir,
   mkdtemp,
   readFile,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import {
+  CODEX_PLUGIN_PLATFORM_TARGETS,
+  type CodexPluginPlatformTarget,
+} from "@open-design/codex-plugin-proto";
 import { parseDistributionBuildReport } from "@open-design/distribution-proto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   codexMarketplaceName,
   packCodexPlugin,
 } from "../src/codex-plugin.js";
 
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) =>
+    rm(root, { force: true, recursive: true })
+  ));
+});
+
+function currentTarget(): CodexPluginPlatformTarget {
+  if (process.platform === "win32" && process.arch === "x64") {
+    return CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64;
+  }
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    return CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64;
+  }
+  throw new Error(`unsupported Codex plugin test host: ${process.platform}-${process.arch}`);
+}
+
+function carrierEntry(target: CodexPluginPlatformTarget): string {
+  return target === CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64
+    ? "bin/node.exe"
+    : "bin/node";
+}
+
+function otherTarget(target: CodexPluginPlatformTarget): CodexPluginPlatformTarget {
+  return target === CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64
+    ? CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64
+    : CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64;
+}
+
 async function createWorkspace(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "open-design-codex-plugin-pack-"));
+  roots.push(root);
   const appRoot = join(root, "apps", "codex-plugin");
   const pluginRoot = join(appRoot, "plugin", "open-design");
   await mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true });
@@ -35,10 +70,9 @@ async function createWorkspace(): Promise<string> {
   await writeFile(join(pluginRoot, ".mcp.json"), JSON.stringify({
     mcpServers: {
       "open-design": {
-        args: ["./bootstrap.sh", "--identity-file", "./distribution.json"],
-        command: "/bin/sh",
+        args: ["./mcp/server.mjs", "--identity-file", "./distribution.json"],
+        command: "./bin/node",
         env_vars: [
-          "OD_CODEX_PLUGIN_ENVIRONMENT_MANIFEST_URL",
           "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
           "OD_DATA_DIR",
           "OD_DISTRIBUTION_CHANNEL_ROOT",
@@ -46,51 +80,39 @@ async function createWorkspace(): Promise<string> {
       },
     },
   }));
-  await writeFile(
-    join(pluginRoot, "bootstrap.sh"),
-    "#!/bin/sh\nexec /bin/false\n",
-  );
   await writeFile(join(pluginRoot, "skills", "status", "SKILL.md"), "# Status\n");
   await writeFile(join(appRoot, "dist", "mcp", "server.mjs"), "export {};\n");
   return root;
 }
 
-async function createFakeArm64Node(workspaceRoot: string): Promise<string> {
-  const path = join(workspaceRoot, "fixtures", "node");
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, [
-    "#!/bin/sh",
-    "if [ \"$1\" = \"--version\" ]; then",
-    "  echo v24.14.0",
-    "elif [ \"$1\" = \"-p\" ]; then",
-    "  echo arm64",
-    "else",
-    "  exit 1",
-    "fi",
-    "",
-  ].join("\n"));
-  await chmod(path, 0o700);
-  return path;
-}
-
 describe("tools-pack codex-plugin", () => {
   it("derives valid, distinct marketplace names from dotted namespaces", () => {
-    expect(codexMarketplaceName("team.preview")).toMatch(
-      /^open-design-team-preview-[0-9a-f]{8}$/,
+    expect(codexMarketplaceName(
+      "team.preview",
+      CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64,
+    )).toMatch(
+      /^open-design-team-preview-win32-x64-[0-9a-f]{8}$/,
     );
-    expect(codexMarketplaceName("team.preview")).not.toBe(
-      codexMarketplaceName("team-preview"),
+    expect(codexMarketplaceName(
+      "team.preview",
+      CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64,
+    )).not.toBe(
+      codexMarketplaceName(
+        "team-preview",
+        CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64,
+      ),
     );
   });
 
   it("builds a relocatable local marketplace and exact report", async () => {
     const workspaceRoot = await createWorkspace();
-    const nodePath = await createFakeArm64Node(workspaceRoot);
+    const target = currentTarget();
     const report = await packCodexPlugin({
+      carrierPath: process.execPath,
       channel: "beta",
       dir: join(workspaceRoot, "tool-root"),
       namespace: "smoke",
-      nodePath,
+      platform: target,
       protocolVersion: 2,
       runtimeVersion: "2.0.0-beta.1",
       shellVersion: "0.2.0",
@@ -109,32 +131,23 @@ describe("tools-pack codex-plugin", () => {
     });
     expect(report.artifact.files).toEqual([...report.artifact.files].sort());
     expect(report.artifact.files).toContain("mcp/server.mjs");
-    expect(report.artifact.files).toContain("bootstrap.sh");
+    expect(report.artifact.files).toContain(carrierEntry(target));
+    expect(report.artifact.files).not.toContain("bootstrap.sh");
     expect(report.artifact.files).not.toContain("distribution.json");
     expect((await stat(join(report.paths.shellRoot, "distribution.json"))).isFile()).toBe(true);
     expect(report.runtimeArtifact).toMatchObject({
       digest: report.identity.runtimeDigest,
       entryPath: "runtime.mjs",
     });
-    expect((await stat(report.runtimeArtifact!.path)).mode & 0o100).toBe(0o100);
-    const environmentArtifact = JSON.parse(await readFile(
-      join(
-        dirname(report.paths.artifactRoot),
-        "environment",
-        "darwin-arm64",
-        "artifact.json",
-      ),
-      "utf8",
-    )) as {
-      path?: string;
-      platform?: string;
-      version?: string;
-    };
-    expect(environmentArtifact).toMatchObject({
-      platform: "darwin-arm64",
-      version: "24.14.0",
-    });
-    expect((await stat(environmentArtifact.path!)).mode & 0o100).toBe(0o100);
+    const runtimeArtifactStat = await stat(report.runtimeArtifact!.path);
+    expect(runtimeArtifactStat.isFile()).toBe(true);
+    if (process.platform !== "win32") {
+      expect(runtimeArtifactStat.mode & 0o100).toBe(0o100);
+    }
+    expect((await stat(
+      join(report.paths.shellRoot, ...carrierEntry(target).split("/")),
+    )).isFile()).toBe(true);
+    expect(report.paths.artifactRoot).toContain(target);
 
     const manifest = JSON.parse(await readFile(report.paths.manifestPath, "utf8")) as {
       version?: string;
@@ -145,15 +158,30 @@ describe("tools-pack codex-plugin", () => {
       "utf8",
     )) as {
       mcpServers?: {
-        "open-design"?: { env_vars?: string[] };
+        "open-design"?: {
+          args?: string[];
+          command?: string;
+          env_vars?: string[];
+          startup_timeout_sec?: number;
+          tool_timeout_sec?: number;
+        };
       };
     };
+    expect(mcpConfig.mcpServers?.["open-design"]?.command).toBe(
+      `./${carrierEntry(target)}`,
+    );
+    expect(mcpConfig.mcpServers?.["open-design"]?.args).toEqual([
+      "./mcp/server.mjs",
+      "--identity-file",
+      "./distribution.json",
+    ]);
     expect(mcpConfig.mcpServers?.["open-design"]?.env_vars).toEqual([
-      "OD_CODEX_PLUGIN_ENVIRONMENT_MANIFEST_URL",
       "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
       "OD_DATA_DIR",
       "OD_DISTRIBUTION_CHANNEL_ROOT",
     ]);
+    expect(mcpConfig.mcpServers?.["open-design"]?.startup_timeout_sec).toBe(10);
+    expect(mcpConfig.mcpServers?.["open-design"]?.tool_timeout_sec).toBe(120);
 
     const marketplace = JSON.parse(await readFile(
       join(report.paths.artifactRoot, ".agents", "plugins", "marketplace.json"),
@@ -190,14 +218,30 @@ describe("tools-pack codex-plugin", () => {
     })).rejects.toThrow();
   });
 
+  it("rejects cross-building a platform carrier on the wrong host", async () => {
+    const workspaceRoot = await createWorkspace();
+    const target = otherTarget(currentTarget());
+    await expect(packCodexPlugin({
+      carrierPath: process.execPath,
+      channel: "stable",
+      platform: target,
+      runtimeVersion: "2.0.0",
+      skipAppBuild: true,
+      workspaceRoot,
+    })).rejects.toThrow(
+      `Codex plugin ${target} artifacts must be built on a ${target} host`,
+    );
+  });
+
   it("produces a stable digest for the same shell inputs", async () => {
     const workspaceRoot = await createWorkspace();
-    const nodePath = await createFakeArm64Node(workspaceRoot);
+    const target = currentTarget();
     const options = {
+      carrierPath: process.execPath,
       channel: "stable",
       dir: join(workspaceRoot, "tool-root"),
       namespace: "deterministic",
-      nodePath,
+      platform: target,
       runtimeVersion: "2.0.0",
       skipAppBuild: true,
       workspaceRoot,
@@ -206,5 +250,30 @@ describe("tools-pack codex-plugin", () => {
     const second = await packCodexPlugin(options);
     expect(second.artifact).toEqual(first.artifact);
     expect(second.identity).toEqual(first.identity);
+  });
+
+  it("binds the external runtime fixture bytes to the runtime version", async () => {
+    const workspaceRoot = await createWorkspace();
+    const target = currentTarget();
+    const options = {
+      carrierPath: process.execPath,
+      channel: "stable",
+      dir: join(workspaceRoot, "tool-root"),
+      namespace: "runtime-version-bound",
+      platform: target,
+      runtimeVersion: "2.0.0",
+      skipAppBuild: true,
+      workspaceRoot,
+    } as const;
+    const first = await packCodexPlugin(options);
+    const second = await packCodexPlugin({
+      ...options,
+      runtimeVersion: "2.0.1",
+    });
+
+    expect(second.identity.runtimeDigest).not.toBe(
+      first.identity.runtimeDigest,
+    );
+    expect(second.identity.shellDigest).toBe(first.identity.shellDigest);
   });
 });

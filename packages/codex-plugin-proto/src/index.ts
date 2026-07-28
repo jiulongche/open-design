@@ -1,7 +1,6 @@
 import { join } from "node:path";
 
 import {
-  normalizeDistributionAbsolutePath,
   normalizeDistributionChannel,
   normalizeDistributionDigest,
   normalizeDistributionInventoryPath,
@@ -24,7 +23,6 @@ export const CODEX_PLUGIN_ARGS = Object.freeze({
 
 export const CODEX_PLUGIN_ENV = Object.freeze({
   DISTRIBUTION_CHANNEL_ROOT: "OD_DISTRIBUTION_CHANNEL_ROOT",
-  ENVIRONMENT_MANIFEST_URL: "OD_CODEX_PLUGIN_ENVIRONMENT_MANIFEST_URL",
   RUNTIME_MANIFEST_URL: "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
 } as const);
 
@@ -44,12 +42,9 @@ export const CODEX_PLUGIN_RUNTIME_MEDIA_TYPES = Object.freeze({
   NODE_MODULE_V1: "application/vnd.open-design.runtime.node-module-v1",
 } as const);
 
-export const CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES = Object.freeze({
-  NODE_EXECUTABLE_V1: "application/vnd.open-design.node-executable-v1",
-} as const);
-
 export const CODEX_PLUGIN_PLATFORM_TARGETS = Object.freeze({
   DARWIN_ARM64: "darwin-arm64",
+  WIN32_X64: "win32-x64",
 } as const);
 
 export type CodexPluginPlatformTarget =
@@ -98,7 +93,6 @@ export type CodexPluginAcquisitionManifestV1 = {
 export type CodexPluginShellPaths = {
   acquisitionPath: string;
   cacheRoot: string;
-  environmentRoot: string;
   handoffsRoot: string;
   logsRoot: string;
   runtimeRoot: string;
@@ -144,28 +138,7 @@ export type CodexPluginRuntimeReadyV1 = {
 };
 
 export type CodexPluginFixtureReportV1 = DistributionServeReportV1 & {
-  environmentManifestUrl: string;
   runtimeManifestUrl: string;
-};
-
-export type CodexPluginEnvironmentArtifactBuildV1 = {
-  digest: string;
-  path: string;
-  platform: CodexPluginPlatformTarget;
-  size: number;
-  version: string;
-};
-
-export type CodexPluginEnvironmentManifestV1 = {
-  node: {
-    digest: string;
-    mediaType: (typeof CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES)["NODE_EXECUTABLE_V1"];
-    size: number;
-    url: string;
-    version: string;
-  };
-  platform: CodexPluginPlatformTarget;
-  schemaVersion: typeof CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION;
 };
 
 export class CodexPluginProtocolError extends Error {
@@ -289,8 +262,15 @@ function normalizeRuntimeMediaType(value: unknown): CodexPluginRuntimeMediaType 
   );
 }
 
-function normalizePlatformTarget(value: unknown): CodexPluginPlatformTarget {
-  if (value === CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64) return value;
+export function normalizeCodexPluginPlatformTarget(
+  value: unknown,
+): CodexPluginPlatformTarget {
+  if (
+    value === CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64
+    || value === CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64
+  ) {
+    return value;
+  }
   throw new CodexPluginProtocolError(
     `unsupported Codex plugin platform target: ${String(value)}`,
   );
@@ -368,7 +348,6 @@ export function resolveCodexPluginShellPaths(
   return {
     acquisitionPath: join(stateRoot, "acquisition.json"),
     cacheRoot: join(shellRoot, "cache"),
-    environmentRoot: join(shellRoot, "environment"),
     handoffsRoot: join(stateRoot, "handoffs"),
     logsRoot: join(shellRoot, "logs"),
     runtimeRoot: join(shellRoot, "runtime"),
@@ -660,7 +639,6 @@ export function parseCodexPluginFixtureReport(
   const record = assertRecord(value, "Codex plugin fixture report");
   assertAllowedKeys(record, [
     "endpointUrl",
-    "environmentManifestUrl",
     "healthUrl",
     "identity",
     "runtimeManifestUrl",
@@ -674,74 +652,10 @@ export function parseCodexPluginFixtureReport(
   });
   return {
     ...distribution,
-    environmentManifestUrl: normalizeRuntimeUrl(
-      record.environmentManifestUrl,
-      "environment manifest URL",
-    ),
     runtimeManifestUrl: normalizeRuntimeUrl(
       record.runtimeManifestUrl,
       "runtime manifest URL",
     ),
-  };
-}
-
-export function parseCodexPluginEnvironmentArtifactBuild(
-  value: unknown,
-): CodexPluginEnvironmentArtifactBuildV1 {
-  const record = assertRecord(value, "Codex plugin environment artifact");
-  assertAllowedKeys(record, [
-    "digest",
-    "path",
-    "platform",
-    "size",
-    "version",
-  ], "Codex plugin environment artifact");
-  return {
-    digest: normalizeDistributionDigest(record.digest, "Node artifact digest"),
-    path: normalizeDistributionAbsolutePath(record.path, "Node artifact path"),
-    platform: normalizePlatformTarget(record.platform),
-    size: normalizeNonNegativeInteger(record.size, "Node artifact size"),
-    version: normalizeDistributionVersion(record.version, "Node version"),
-  };
-}
-
-export function parseCodexPluginEnvironmentManifest(
-  value: unknown,
-): CodexPluginEnvironmentManifestV1 {
-  const record = assertRecord(value, "Codex plugin environment manifest");
-  assertAllowedKeys(record, [
-    "node",
-    "platform",
-    "schemaVersion",
-  ], "Codex plugin environment manifest");
-  if (record.schemaVersion !== CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION) {
-    throw new CodexPluginProtocolError(
-      `unsupported Codex plugin protocol schema version: ${String(record.schemaVersion)}`,
-    );
-  }
-  const node = assertRecord(record.node, "Codex plugin environment Node");
-  assertAllowedKeys(node, [
-    "digest",
-    "mediaType",
-    "size",
-    "url",
-    "version",
-  ], "Codex plugin environment Node");
-  if (node.mediaType !== CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES.NODE_EXECUTABLE_V1) {
-    throw new CodexPluginProtocolError(
-      `unsupported Codex plugin environment media type: ${String(node.mediaType)}`,
-    );
-  }
-  return {
-    node: {
-      digest: normalizeDistributionDigest(node.digest, "Node artifact digest"),
-      mediaType: CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES.NODE_EXECUTABLE_V1,
-      size: normalizeNonNegativeInteger(node.size, "Node artifact size"),
-      url: normalizeRuntimeUrl(node.url, "Node artifact URL"),
-      version: normalizeDistributionVersion(node.version, "Node version"),
-    },
-    platform: normalizePlatformTarget(record.platform),
-    schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   };
 }
 

@@ -22,11 +22,21 @@ import { isProcessAlive } from "@open-design/platform";
 export const TOOLS_CODEX_OWNER = "open-design/tools-codex" as const;
 export const TOOLS_CODEX_SCHEMA_VERSION = 1 as const;
 
+export type ToolCodexVerifiedRuntimeState = {
+  buildReportPath: string;
+  distributionChannelRoot: string;
+  fixtureReportUrl: string | null;
+  identityKey: string;
+  runtimeManifestUrl: string;
+  verifiedAt: string;
+};
+
 export type ToolCodexPreparedState = {
   artifactRoot: string;
   identityKey: string;
   marketplaceName: string;
   preparedAt: string;
+  runtime?: ToolCodexVerifiedRuntimeState;
 };
 
 export type ToolCodexSentinelV1 = {
@@ -49,6 +59,7 @@ type ToolCodexRootOwnerV1 = {
 export type ToolCodexRunMarkerV1 = {
   appPath: string;
   codexHome: string;
+  desktopUserDataPath: string | null;
   desktopVersion: string | null;
   executablePath: string;
   namespace: string;
@@ -75,9 +86,9 @@ export type ToolCodexPaths = {
   codexHome: string;
   configPath: string;
   controlRoot: string;
-  desktopHostLoadReportPath: string;
+  desktopUiObservationPath: string;
+  desktopUserDataPath: string;
   globalLockPath: string;
-  invocationReportPath: string;
   markerPath: string;
   namespace: string;
   namespaceRoot: string;
@@ -122,15 +133,16 @@ export function resolveToolCodexPaths(options: {
   const root = resolve(expandHomePrefix(options.stateRoot ?? defaultToolsCodexRoot()));
   const namespaceRoot = join(root, namespace);
   const codexHome = join(namespaceRoot, "codex-home");
+  const desktopUserDataPath = join(namespaceRoot, "desktop-user-data");
   const reportsRoot = join(namespaceRoot, "reports");
   return {
     acceptanceReportPath: join(reportsRoot, "acceptance-report.json"),
     codexHome,
     configPath: join(codexHome, "config.toml"),
     controlRoot: join(root, ".control"),
-    desktopHostLoadReportPath: join(reportsRoot, "desktop-host-load.json"),
+    desktopUiObservationPath: join(reportsRoot, "desktop-ui-observation.json"),
+    desktopUserDataPath,
     globalLockPath: join(root, ".control", "desktop.lock"),
-    invocationReportPath: join(reportsRoot, "automated-invocation.json"),
     markerPath: join(namespaceRoot, "run-marker.json"),
     namespace,
     namespaceRoot,
@@ -194,11 +206,44 @@ function parsePreparedState(value: unknown): ToolCodexPreparedState | undefined 
     || typeof value.preparedAt !== "string") {
     throw new ToolCodexError("SENTINEL_INVALID", "tools-codex prepared state is invalid");
   }
+  const runtime = parseVerifiedRuntimeState(value.runtime, value.identityKey);
   return {
     artifactRoot: resolve(value.artifactRoot),
     identityKey: value.identityKey,
     marketplaceName: value.marketplaceName,
     preparedAt: value.preparedAt,
+    ...(runtime == null ? {} : { runtime }),
+  };
+}
+
+function parseVerifiedRuntimeState(
+  value: unknown,
+  preparedIdentityKey: string,
+): ToolCodexVerifiedRuntimeState | undefined {
+  if (value == null) return undefined;
+  if (!isRecord(value)
+    || typeof value.buildReportPath !== "string"
+    || typeof value.distributionChannelRoot !== "string"
+    || (
+      value.fixtureReportUrl !== null
+      && typeof value.fixtureReportUrl !== "string"
+    )
+    || typeof value.identityKey !== "string"
+    || value.identityKey !== preparedIdentityKey
+    || typeof value.runtimeManifestUrl !== "string"
+    || typeof value.verifiedAt !== "string") {
+    throw new ToolCodexError(
+      "SENTINEL_INVALID",
+      "tools-codex verified runtime state is invalid",
+    );
+  }
+  return {
+    buildReportPath: resolve(value.buildReportPath),
+    distributionChannelRoot: resolve(value.distributionChannelRoot),
+    fixtureReportUrl: value.fixtureReportUrl,
+    identityKey: value.identityKey,
+    runtimeManifestUrl: value.runtimeManifestUrl,
+    verifiedAt: value.verifiedAt,
   };
 }
 
@@ -235,6 +280,13 @@ export function parseToolCodexRunMarker(value: unknown, paths: ToolCodexPaths): 
     || value.namespace !== paths.namespace
     || resolve(String(value.codexHome)) !== paths.codexHome
     || typeof value.appPath !== "string"
+    || (
+      value.desktopUserDataPath !== null
+      && (
+        typeof value.desktopUserDataPath !== "string"
+        || resolve(value.desktopUserDataPath) !== paths.desktopUserDataPath
+      )
+    )
     || typeof value.executablePath !== "string"
     || typeof value.rootPid !== "number"
     || !Number.isSafeInteger(value.rootPid)
@@ -249,6 +301,9 @@ export function parseToolCodexRunMarker(value: unknown, paths: ToolCodexPaths): 
   return {
     appPath: resolve(value.appPath),
     codexHome: paths.codexHome,
+    desktopUserDataPath: value.desktopUserDataPath == null
+      ? null
+      : paths.desktopUserDataPath,
     desktopVersion: value.desktopVersion ?? null,
     executablePath: resolve(value.executablePath),
     namespace: paths.namespace,
@@ -268,6 +323,10 @@ export async function readToolCodexSentinel(paths: ToolCodexPaths): Promise<Tool
     await assertNotSymlink(paths.controlRoot, "tools-codex control root");
     await assertNotSymlink(paths.namespaceRoot, "tools-codex namespace root");
     await assertNotSymlink(paths.codexHome, "tools-codex Codex home");
+    await assertNotSymlink(
+      paths.desktopUserDataPath,
+      "tools-codex Desktop user-data root",
+    );
     await assertNotSymlink(paths.reportsRoot, "tools-codex reports root");
     await assertNotSymlink(paths.runsRoot, "tools-codex runs root");
     await assertNotSymlink(paths.workspaceRoot, "tools-codex workspace root");
@@ -348,6 +407,7 @@ export async function initializeToolCodexEnvironment(
   await mkdir(paths.namespaceRoot, { mode: 0o700 });
   for (const directory of [
     paths.codexHome,
+    paths.desktopUserDataPath,
     paths.reportsRoot,
     paths.runsRoot,
     paths.workspaceRoot,
@@ -383,6 +443,14 @@ export async function writeToolCodexReport(
   value: unknown,
 ): Promise<void> {
   await readToolCodexSentinel(paths);
+  const resolvedPath = resolveToolCodexReportPath(paths, path);
+  await writeJsonAtomic(resolvedPath, value);
+}
+
+export function resolveToolCodexReportPath(
+  paths: ToolCodexPaths,
+  path: string,
+): string {
   const resolvedPath = resolve(path);
   if (dirname(resolvedPath) !== paths.reportsRoot) {
     throw new ToolCodexError(
@@ -390,7 +458,7 @@ export async function writeToolCodexReport(
       `tools-codex reports must be direct children of ${paths.reportsRoot}`,
     );
   }
-  await writeJsonAtomic(resolvedPath, value);
+  return resolvedPath;
 }
 
 export async function writeToolCodexRunMarker(

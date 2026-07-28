@@ -1,4 +1,13 @@
-import { access, chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -39,20 +48,22 @@ describe("tools-codex managed state", () => {
     expect(first.created).toBe(true);
     expect(second.created).toBe(false);
     expect(paths.codexHome).toBe(join(paths.namespaceRoot, "codex-home"));
-    expect(paths.globalLockPath.startsWith(paths.namespaceRoot)).toBe(false);
-    expect(paths.desktopHostLoadReportPath).toBe(
-      join(paths.reportsRoot, "desktop-host-load.json"),
+    expect(paths.desktopUserDataPath).toBe(
+      join(paths.namespaceRoot, "desktop-user-data"),
     );
-    expect(paths.invocationReportPath).toBe(
-      join(paths.reportsRoot, "automated-invocation.json"),
+    expect(paths.globalLockPath.startsWith(paths.namespaceRoot)).toBe(false);
+    expect(paths.desktopUiObservationPath).toBe(
+      join(paths.reportsRoot, "desktop-ui-observation.json"),
     );
     expect(paths.acceptanceReportPath).toBe(
       join(paths.reportsRoot, "acceptance-report.json"),
     );
     expect(second.sentinel.createdAt).toBe("2026-07-27T00:00:00.000Z");
     await expect(access(paths.configPath)).rejects.toMatchObject({ code: "ENOENT" });
-    expect((await stat(paths.namespaceRoot)).mode & 0o777).toBe(0o700);
-    expect((await stat(paths.sentinelPath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect((await stat(paths.namespaceRoot)).mode & 0o777).toBe(0o700);
+      expect((await stat(paths.sentinelPath)).mode & 0o777).toBe(0o600);
+    }
   });
 
   it("refuses to adopt a non-empty unowned state root", async () => {
@@ -84,6 +95,15 @@ describe("tools-codex managed state", () => {
         identityKey: "identity",
         marketplaceName: "open-design-smoke",
         preparedAt: "2026-07-27T01:00:00.000Z",
+        runtime: {
+          buildReportPath: join(stateRoot, "artifact", "build-report.json"),
+          distributionChannelRoot: join(stateRoot, "channel"),
+          fixtureReportUrl: "http://127.0.0.1:17456/report",
+          identityKey: "identity",
+          runtimeManifestUrl:
+            "http://127.0.0.1:17456/runtime/manifest.json",
+          verifiedAt: "2026-07-27T01:30:00.000Z",
+        },
       },
     }));
 
@@ -92,8 +112,45 @@ describe("tools-codex managed state", () => {
       prepared: {
         identityKey: "identity",
         marketplaceName: "open-design-smoke",
+        runtime: {
+          identityKey: "identity",
+          runtimeManifestUrl:
+            "http://127.0.0.1:17456/runtime/manifest.json",
+        },
       },
     });
+  });
+
+  it("rejects runtime state for a different prepared identity", async () => {
+    const stateRoot = await createRoot();
+    const paths = resolveToolCodexPaths({
+      namespace: "desktop-smoke",
+      stateRoot: join(stateRoot, "tools-codex"),
+    });
+    await initializeToolCodexEnvironment(paths);
+    const sentinel = JSON.parse(
+      await readFile(paths.sentinelPath, "utf8"),
+    ) as Record<string, unknown>;
+    sentinel.prepared = {
+      artifactRoot: join(stateRoot, "artifact"),
+      identityKey: "prepared-identity",
+      marketplaceName: "open-design-smoke",
+      preparedAt: "2026-07-27T01:00:00.000Z",
+      runtime: {
+        buildReportPath: join(stateRoot, "artifact", "build-report.json"),
+        distributionChannelRoot: join(stateRoot, "channel"),
+        fixtureReportUrl: null,
+        identityKey: "different-identity",
+        runtimeManifestUrl:
+          "http://127.0.0.1:17456/runtime/manifest.json",
+        verifiedAt: "2026-07-27T01:30:00.000Z",
+      },
+    };
+    await writeFile(paths.sentinelPath, JSON.stringify(sentinel));
+
+    await expect(readToolCodexSentinel(paths)).rejects.toMatchObject({
+      code: "SENTINEL_INVALID",
+    } satisfies Partial<ToolCodexError>);
   });
 
   it("rejects a symlinked namespace root", async () => {

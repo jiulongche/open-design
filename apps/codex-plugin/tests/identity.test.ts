@@ -1,6 +1,6 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
@@ -38,7 +38,7 @@ describe("codex plugin identity", () => {
     expect(resolveIdentityFile(
       ["--identity-file", "./distribution.json"],
       "/tmp/plugin",
-    )).toBe("/tmp/plugin/distribution.json");
+    )).toBe(resolve("/tmp/plugin/distribution.json"));
   });
 
   it("reads and validates the generated identity file", async () => {

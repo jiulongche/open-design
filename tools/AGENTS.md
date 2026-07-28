@@ -4,7 +4,7 @@ Follow the root `AGENTS.md` first. This file only records module-level boundarie
 
 ## Active tools
 
-- `tools/codex` provides `@open-design/tools-codex` and the `tools-codex` bin. It owns the persistent, namespaced Codex Desktop acceptance environment under `~/.od/tools-codex/<namespace>`, plugin preparation, controlled Desktop lifecycle, evidence reports, and layered cleanup. Read `tools/codex/AGENTS.md` before changing or operating this control plane.
+- `tools/codex` provides `@open-design/tools-codex` and the `tools-codex` bin. It owns the persistent, namespaced Codex Desktop acceptance environment under `~/.od/tools-codex/<namespace>`, plugin preparation, controlled Desktop lifecycle, operator screenshot evidence, acceptance reports, and layered cleanup. Read `tools/codex/AGENTS.md` before changing or operating this control plane.
 - `tools/dev` provides `@open-design/tools-dev` and the `tools-dev` bin. It is the only currently active local development lifecycle control plane.
 - `pnpm tools-dev` manages daemon -> web -> desktop.
 - `pnpm tools-dev run web` runs foreground daemon + web for the Playwright webServer flow.
@@ -51,8 +51,8 @@ pnpm --filter @open-design/tools-release build
 pnpm --filter @open-design/tools-release test
 pnpm tools-codex init --namespace desktop-smoke
 pnpm tools-codex status --namespace desktop-smoke --json
-pnpm tools-codex start --namespace desktop-smoke --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke/build-report.json --json
-pnpm tools-codex invoke --namespace desktop-smoke --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke/build-report.json --json
+pnpm tools-codex start --namespace desktop-smoke --json
+pnpm tools-codex record-ui --namespace desktop-smoke --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke/build-report.json --screenshot <desktop.png> --tool get_open_design_status --operator <name> --json
 pnpm tools-codex accept --namespace desktop-smoke --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke/build-report.json --json
 pnpm tools-dev status --json
 pnpm tools-dev logs --json

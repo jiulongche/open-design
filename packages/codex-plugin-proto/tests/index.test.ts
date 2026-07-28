@@ -4,16 +4,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   CODEX_PLUGIN_HANDOFF_STATES,
-  CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES,
   CODEX_PLUGIN_PLATFORM_TARGETS,
   CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
   CodexPluginProtocolError,
   assertCodexPluginHandoffTransition,
   compareCodexPluginShellVersions,
+  normalizeCodexPluginPlatformTarget,
   parseCodexPluginAcquisitionManifest,
-  parseCodexPluginEnvironmentArtifactBuild,
-  parseCodexPluginEnvironmentManifest,
   parseCodexPluginFixtureReport,
   parseCodexPluginHandoffDescriptor,
   parseCodexPluginRuntimeReady,
@@ -187,8 +185,6 @@ describe("@open-design/codex-plugin-proto", () => {
   it("parses a loopback fixture report with a runtime manifest URL", () => {
     expect(parseCodexPluginFixtureReport({
       endpointUrl: "http://127.0.0.1:17456/runtime",
-      environmentManifestUrl:
-        "http://127.0.0.1:17456/codex-plugin/beta/latest/platforms/darwin-arm64.json",
       healthUrl: "http://127.0.0.1:17456/health",
       identity: {
         channel: "beta",
@@ -203,31 +199,19 @@ describe("@open-design/codex-plugin-proto", () => {
       runtimeManifestUrl: "http://127.0.0.1:17456/runtime/manifest.json",
       schemaVersion: 1,
     })).toMatchObject({
-      environmentManifestUrl:
-        "http://127.0.0.1:17456/codex-plugin/beta/latest/platforms/darwin-arm64.json",
       runtimeManifestUrl: "http://127.0.0.1:17456/runtime/manifest.json",
     });
   });
 
-  it("parses the independent macOS arm64 Node delivery contract", () => {
-    const artifact = parseCodexPluginEnvironmentArtifactBuild({
-      digest: RUNTIME_DIGEST,
-      path: "/tmp/codex-plugin/environment/darwin-arm64/node",
-      platform: CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
-      size: 1024,
-      version: "24.14.0",
-    });
-    expect(artifact.platform).toBe("darwin-arm64");
-    expect(parseCodexPluginEnvironmentManifest({
-      node: {
-        digest: artifact.digest,
-        mediaType: CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES.NODE_EXECUTABLE_V1,
-        size: artifact.size,
-        url: "http://127.0.0.1:17456/codex-plugin/beta/versions/24.14.0/platforms/darwin-arm64/node",
-        version: artifact.version,
-      },
-      platform: artifact.platform,
-      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
-    }).node.version).toBe("24.14.0");
+  it("accepts only the platform targets shipped as native plugin artifacts", () => {
+    expect(normalizeCodexPluginPlatformTarget(
+      CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
+    )).toBe("darwin-arm64");
+    expect(normalizeCodexPluginPlatformTarget(
+      CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64,
+    )).toBe("win32-x64");
+    expect(() => normalizeCodexPluginPlatformTarget("linux-x64")).toThrow(
+      "unsupported Codex plugin platform target",
+    );
   });
 });

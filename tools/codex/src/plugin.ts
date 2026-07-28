@@ -1,12 +1,18 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   access,
+  chmod,
   lstat,
+  mkdir,
   readFile,
   readdir,
   realpath,
+  rename,
+  stat,
+  unlink,
+  writeFile,
 } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep, win32 } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -19,6 +25,7 @@ import {
   assertSameDistributionRuntimeIdentity,
   calculateDistributionArtifactInventory,
   distributionIdentityKey,
+  normalizeDistributionInventoryPath,
   parseDistributionBuildReport,
   parseDistributionRuntimeBinding,
   type DistributionBuildReportV1,
@@ -26,16 +33,14 @@ import {
 } from "@open-design/distribution-proto";
 
 import {
-  parseToolCodexDesktopHostLoadReport,
-  type ToolCodexDesktopHostLoadReportV1,
-} from "./desktop-evidence.js";
-import {
   ToolCodexError,
   acquireToolCodexGlobalLock,
   readToolCodexSentinel,
+  resolveToolCodexReportPath,
   updateToolCodexSentinel,
   writeToolCodexReport,
   type ToolCodexPaths,
+  type ToolCodexVerifiedRuntimeState,
 } from "./state.js";
 import {
   inspectToolCodexEnvironment,
@@ -43,11 +48,7 @@ import {
   type ToolCodexStatus,
 } from "./host.js";
 import {
-  TOOL_CODEX_INVOCATION_SCHEMA_VERSION,
-  parseToolCodexAutomatedInvocationReport,
-  type ToolCodexAutomatedInvocationReportV1,
-} from "./invocation.js";
-import {
+  runtimeBindingFromPreparedState,
   toolCodexRuntimeEnv,
   type ToolCodexRuntimeBinding,
 } from "./runtime.js";
@@ -72,9 +73,7 @@ export type ToolCodexPrepareResult = {
 
 export type ToolCodexAcceptanceSignals = {
   artifactValid: boolean;
-  automatedInvocation: boolean | null;
   desktopControlled: boolean;
-  desktopHostLoaded: boolean | null;
   desktopRunning: boolean;
   desktopUiObserved: boolean | null;
   loggedIn: boolean | null;
@@ -85,11 +84,21 @@ export type ToolCodexAcceptanceSignals = {
 
 export type ToolCodexEvidenceEvaluation = {
   available: boolean;
+  capturedAt: string | null;
   identityMatches: boolean | null;
+  outcome: "PASS" | "FAIL" | null;
   reasonCode: string | null;
   reportPath: string | null;
   runMatches: boolean | null;
+  screenshot: {
+    mediaType: "image/png";
+    path: string;
+    sha256: string;
+    size: number;
+  } | null;
+  screenshotMatches: boolean | null;
   status: "PASS" | "FAIL" | null;
+  toolMatches: boolean | null;
 };
 
 export type ToolCodexAcceptanceReport = {
@@ -100,12 +109,11 @@ export type ToolCodexAcceptanceReport = {
   observations: {
     cliVersion: string | null;
     desktopVersion: string | null;
+    expectedTool: "ensure_open_design_runtime" | "get_open_design_status";
     marketplaceName: string;
     stdioStatus: unknown | null;
   };
   evidence: {
-    automatedInvocation: ToolCodexEvidenceEvaluation;
-    desktopHostLoaded: ToolCodexEvidenceEvaluation;
     desktopUiObserved: ToolCodexEvidenceEvaluation;
   };
   operator: {
@@ -364,6 +372,135 @@ async function readMarketplace(buildReport: DistributionBuildReportV1): Promise<
   return { marketplaceName: record.name };
 }
 
+type CodexPluginMcpLaunch = {
+  args: string[];
+  command: string;
+  commandEntry: string;
+  startupTimeoutMs: number;
+};
+
+export const WINDOWS_CODEX_PLUGIN_COMMAND_MAX_PATH_LENGTH = 259;
+
+export function assertCodexPluginCacheCommandPathSupported(options: {
+  codexHome: string;
+  commandEntry: string;
+  marketplaceName: string;
+  platform?: NodeJS.Platform;
+  shellVersion: string;
+}): string {
+  const platform = options.platform ?? process.platform;
+  const commandPath = platform === "win32"
+    ? win32.join(
+        options.codexHome,
+        "plugins",
+        "cache",
+        options.marketplaceName,
+        "open-design",
+        options.shellVersion,
+        ...options.commandEntry.split("/"),
+      )
+    : join(
+        options.codexHome,
+        "plugins",
+        "cache",
+        options.marketplaceName,
+        "open-design",
+        options.shellVersion,
+        ...options.commandEntry.split("/"),
+      );
+  if (
+    platform === "win32"
+    && commandPath.length > WINDOWS_CODEX_PLUGIN_COMMAND_MAX_PATH_LENGTH
+  ) {
+    throw new ToolCodexError(
+      "WINDOWS_PLUGIN_CACHE_PATH_TOO_LONG",
+      `installed Codex plugin command path exceeds the Win32 process-launch limit: ${commandPath.length} > ${WINDOWS_CODEX_PLUGIN_COMMAND_MAX_PATH_LENGTH}`,
+      {
+        commandPath,
+        commandPathLength: commandPath.length,
+        maxPathLength: WINDOWS_CODEX_PLUGIN_COMMAND_MAX_PATH_LENGTH,
+        remedies: [
+          "use a shorter tools-codex --state-root",
+          "use a shorter distribution namespace",
+          "use a compact development shell version",
+        ],
+      },
+    );
+  }
+  return commandPath;
+}
+
+async function readCodexPluginMcpLaunch(
+  buildReport: DistributionBuildReportV1,
+): Promise<CodexPluginMcpLaunch> {
+  const value = await readJson(join(buildReport.paths.shellRoot, ".mcp.json"));
+  if (value == null || typeof value !== "object") {
+    throw new ToolCodexError(
+      "MCP_MANIFEST_INVALID",
+      "Codex plugin MCP manifest must be an object",
+    );
+  }
+  const server = (value as {
+    mcpServers?: {
+      "open-design"?: {
+        args?: unknown;
+        command?: unknown;
+        cwd?: unknown;
+        startup_timeout_sec?: unknown;
+      };
+    };
+  }).mcpServers?.["open-design"];
+  if (server == null
+    || typeof server.command !== "string"
+    || !server.command.startsWith("./")
+    || !Array.isArray(server.args)
+    || !server.args.every((entry): entry is string => typeof entry === "string")
+    || server.cwd !== "."
+    || typeof server.startup_timeout_sec !== "number"
+    || !Number.isFinite(server.startup_timeout_sec)
+    || server.startup_timeout_sec <= 0
+    || server.startup_timeout_sec > 10) {
+    throw new ToolCodexError(
+      "MCP_MANIFEST_INVALID",
+      "Codex plugin MCP manifest must declare a relative command, string args, cwd '.', and startup timeout at most 10 seconds",
+    );
+  }
+  const commandEntry = normalizeDistributionInventoryPath(
+    server.command.slice(2),
+  );
+  if (!buildReport.artifact.files.includes(commandEntry)) {
+    throw new ToolCodexError(
+      "MCP_COMMAND_NOT_IN_ARTIFACT",
+      `Codex plugin MCP command is not part of the verified artifact: ${commandEntry}`,
+    );
+  }
+  return {
+    args: [...server.args],
+    command: join(buildReport.paths.shellRoot, ...commandEntry.split("/")),
+    commandEntry,
+    startupTimeoutMs: server.startup_timeout_sec * 1_000,
+  };
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timeout: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timeout.unref();
+      }),
+    ]);
+  } finally {
+    if (timeout != null) clearTimeout(timeout);
+  }
+}
+
 export async function removeToolCodexPreparedPlugin(
   paths: ToolCodexPaths,
   codexBin: string,
@@ -429,7 +566,16 @@ export async function prepareToolCodexPlugin(options: {
   const buildReportPath = resolve(options.buildReportPath);
   const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
   await verifyToolCodexArtifact(buildReport);
-  const { marketplaceName } = await readMarketplace(buildReport);
+  const [{ marketplaceName }, launch] = await Promise.all([
+    readMarketplace(buildReport),
+    readCodexPluginMcpLaunch(buildReport),
+  ]);
+  assertCodexPluginCacheCommandPathSupported({
+    codexHome: options.paths.codexHome,
+    commandEntry: launch.commandEntry,
+    marketplaceName,
+    shellVersion: buildReport.identity.shellVersion,
+  });
   const codexBin = options.codexBin ?? "codex";
   const status = await inspectToolCodexEnvironment({
     appPath: options.appPath,
@@ -537,11 +683,8 @@ async function probeStdio(
   fixtureReportUrl?: string,
   runtimeBinding?: ToolCodexRuntimeBinding | null,
 ): Promise<unknown> {
-  const args = [
-    "./bootstrap.sh",
-    "--identity-file",
-    "./distribution.json",
-  ];
+  const launch = await readCodexPluginMcpLaunch(buildReport);
+  const args = [...launch.args];
   if (fixtureReportUrl != null) {
     args.push("--fixture-report-url", fixtureReportUrl);
   }
@@ -555,7 +698,7 @@ async function probeStdio(
   }
   const transport = new StdioClientTransport({
     args,
-    command: "/bin/sh",
+    command: launch.command,
     cwd: buildReport.paths.shellRoot,
     env: Object.fromEntries(
       Object.entries({
@@ -570,7 +713,11 @@ async function probeStdio(
     version: "0.1.0",
   });
   try {
-    await client.connect(transport);
+    await withTimeout(
+      client.connect(transport),
+      launch.startupTimeoutMs,
+      `Codex plugin MCP initialize exceeded ${launch.startupTimeoutMs}ms`,
+    );
     const tools = await client.listTools();
     if (!tools.tools.some((tool) => tool.name === "get_open_design_status")) {
       throw new Error("Codex plugin status tool is missing");
@@ -618,11 +765,17 @@ async function probeStdio(
   }
 }
 
+export type ToolCodexHandoffReport = {
+  buildReportPath: string;
+  identity: DistributionIdentityV1;
+  observation: unknown;
+};
+
 export async function runToolCodexHandoffProbe(options: {
   buildReportPath: string;
   fixtureReportUrl?: string;
   runtimeBinding: ToolCodexRuntimeBinding;
-}): Promise<unknown> {
+}): Promise<ToolCodexHandoffReport> {
   const buildReportPath = resolve(options.buildReportPath);
   const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
   await verifyToolCodexArtifact(buildReport);
@@ -637,31 +790,87 @@ export async function runToolCodexHandoffProbe(options: {
   };
 }
 
-export function extractObservedIdentity(value: unknown): DistributionIdentityV1 | null {
-  if (value == null || typeof value !== "object") return null;
-  if ("identity" in value) {
-    return (value as { identity?: DistributionIdentityV1 }).identity ?? null;
-  }
-  for (const key of ["structuredContent", "structured_content", "result"]) {
-    if (key in value) {
-      const identity = extractObservedIdentity(
-        (value as Record<string, unknown>)[key],
+export async function verifyAndRecordToolCodexRuntimeHandoff(options: {
+  buildReportPath: string;
+  fixtureReportUrl?: string;
+  paths: ToolCodexPaths;
+  runtimeBinding: ToolCodexRuntimeBinding;
+}): Promise<ToolCodexHandoffReport & {
+  runtime: ToolCodexVerifiedRuntimeState;
+}> {
+  const lock = await acquireToolCodexGlobalLock(options.paths, "handoff");
+  try {
+    const buildReportPath = resolve(options.buildReportPath);
+    const buildReport = parseDistributionBuildReport(
+      await readJson(buildReportPath),
+    );
+    const identityKey = distributionIdentityKey(buildReport.identity);
+    const sentinel = await readToolCodexSentinel(options.paths);
+    if (
+      sentinel.prepared == null
+      || sentinel.prepared.identityKey !== identityKey
+      || await canonicalPath(sentinel.prepared.artifactRoot)
+        !== await canonicalPath(buildReport.paths.artifactRoot)
+    ) {
+      throw new ToolCodexError(
+        "RUNTIME_HANDOFF_PREPARE_MISMATCH",
+        "handoff build must match the plugin prepared in this managed environment",
       );
-      if (identity != null) return identity;
     }
+    const report = await runToolCodexHandoffProbe({
+      buildReportPath,
+      fixtureReportUrl: options.fixtureReportUrl,
+      runtimeBinding: options.runtimeBinding,
+    });
+    const runtime: ToolCodexVerifiedRuntimeState = {
+      buildReportPath,
+      distributionChannelRoot:
+        options.runtimeBinding.distributionChannelRoot,
+      fixtureReportUrl: options.fixtureReportUrl ?? null,
+      identityKey,
+      runtimeManifestUrl: options.runtimeBinding.runtimeManifestUrl,
+      verifiedAt: new Date().toISOString(),
+    };
+    await updateToolCodexSentinel(options.paths, (current) => {
+      if (
+        current.prepared == null
+        || current.prepared.identityKey !== identityKey
+      ) {
+        throw new ToolCodexError(
+          "RUNTIME_HANDOFF_PREPARE_MISMATCH",
+          "prepared plugin changed before runtime handoff could be recorded",
+        );
+      }
+      return {
+        ...current,
+        prepared: {
+          ...current.prepared,
+          runtime,
+        },
+      };
+    });
+    return { ...report, runtime };
+  } finally {
+    await lock.release();
   }
-  return null;
 }
 
-export const TOOL_CODEX_DESKTOP_UI_OBSERVATION_SCHEMA_VERSION = 1 as const;
+export const TOOL_CODEX_DESKTOP_UI_OBSERVATION_SCHEMA_VERSION = 2 as const;
 
-export type ToolCodexDesktopUiObservationV1 = {
+export type ToolCodexDesktopUiObservationV2 = {
   capturedAt: string;
+  outcome: "PASS" | "FAIL";
   provenance: {
     kind: "operator-captured-desktop-ui";
+    operator: string;
     runId: string;
   };
   schemaVersion: typeof TOOL_CODEX_DESKTOP_UI_OBSERVATION_SCHEMA_VERSION;
+  screenshot: {
+    mediaType: "image/png";
+    path: string;
+    sha256: string;
+  };
   server: "open-design";
   structuredContent: {
     identity: DistributionIdentityV1;
@@ -675,7 +884,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 export function parseToolCodexDesktopUiObservation(
   value: unknown,
-): ToolCodexDesktopUiObservationV1 {
+): ToolCodexDesktopUiObservationV2 {
   if (!isRecord(value)
     || value.schemaVersion !== TOOL_CODEX_DESKTOP_UI_OBSERVATION_SCHEMA_VERSION
     || value.server !== "open-design"
@@ -684,17 +893,28 @@ export function parseToolCodexDesktopUiObservation(
       && value.tool !== "ensure_open_design_runtime"
     )
     || typeof value.capturedAt !== "string"
+    || !Number.isFinite(Date.parse(value.capturedAt))
+    || (value.outcome !== "PASS" && value.outcome !== "FAIL")
     || !isRecord(value.provenance)
     || value.provenance.kind !== "operator-captured-desktop-ui"
+    || typeof value.provenance.operator !== "string"
+    || value.provenance.operator.trim().length === 0
     || typeof value.provenance.runId !== "string"
+    || value.provenance.runId.length === 0
+    || !isRecord(value.screenshot)
+    || value.screenshot.mediaType !== "image/png"
+    || typeof value.screenshot.path !== "string"
+    || value.screenshot.path.length === 0
+    || typeof value.screenshot.sha256 !== "string"
+    || !/^sha256:[0-9a-f]{64}$/.test(value.screenshot.sha256)
     || !isRecord(value.structuredContent)
     || !isRecord(value.structuredContent.identity)) {
     throw new ToolCodexError(
       "DESKTOP_UI_OBSERVATION_INVALID",
-      "Desktop UI observation must include explicit operator provenance",
+      "Desktop UI observation must include explicit operator provenance, a PNG screenshot digest, outcome, tool, and identity",
     );
   }
-  return value as ToolCodexDesktopUiObservationV1;
+  return value as ToolCodexDesktopUiObservationV2;
 }
 
 export function classifyToolCodexAcceptance(
@@ -703,8 +923,6 @@ export function classifyToolCodexAcceptance(
 ): CodexDesktopAcceptanceStatus {
   if (!signals.artifactValid
     || !signals.stdioProbePassed
-    || signals.desktopHostLoaded === false
-    || signals.automatedInvocation === false
     || signals.desktopUiObserved === false) {
     return "FAIL";
   }
@@ -720,8 +938,7 @@ export function classifyToolCodexAcceptance(
     || signals.loggedIn !== true
     || !signals.marketplaceConfigured
     || !signals.pluginInstalled
-    || signals.desktopHostLoaded == null
-    || signals.automatedInvocation == null) {
+    || signals.desktopUiObserved == null) {
     return "OPERATOR_ACTION_REQUIRED";
   }
   return "PASS";
@@ -739,114 +956,290 @@ function identityMatches(
   }
 }
 
-async function optionalReport(path: string): Promise<unknown | null> {
-  return await readJson(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-}
-
 function unavailableEvidence(
   path: string | null,
   reasonCode: string | null = null,
 ): ToolCodexEvidenceEvaluation {
   return {
     available: false,
+    capturedAt: null,
     identityMatches: null,
+    outcome: null,
     reasonCode,
     reportPath: path,
     runMatches: null,
+    screenshot: null,
+    screenshotMatches: null,
     status: null,
+    toolMatches: null,
   };
 }
 
-function evaluateDesktopHostLoad(
-  report: ToolCodexDesktopHostLoadReportV1 | null,
-  reportPath: string,
-  buildIdentity: DistributionIdentityV1,
-  host: ToolCodexStatus,
-): ToolCodexEvidenceEvaluation {
-  if (report == null) return unavailableEvidence(reportPath, "EVIDENCE_NOT_CAPTURED");
-  const identityMatch = identityMatches(buildIdentity, report.identity);
-  const runMatches = host.marker != null
-    && report.provenance.runId === host.marker.runId
-    && report.provenance.rootPid === host.marker.rootPid
-    && report.provenance.rootStartedAt === host.marker.rootStartedAt;
-  if (!runMatches) return unavailableEvidence(reportPath, "STALE_FOR_CURRENT_RUN");
+function isPng(bytes: Buffer): boolean {
+  return bytes.length >= 33
+    && bytes.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    )
+    && bytes.readUInt32BE(8) === 13
+    && bytes.subarray(12, 16).equals(Buffer.from("IHDR"))
+    && bytes.readUInt32BE(16) > 0
+    && bytes.readUInt32BE(20) > 0;
+}
+
+export async function inspectToolCodexDesktopScreenshot(
+  path: string,
+  expectedDigest: string,
+): Promise<ToolCodexEvidenceEvaluation["screenshot"] & {
+  matches: boolean;
+}> {
+  const info = await lstat(path);
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new ToolCodexError(
+      "DESKTOP_UI_SCREENSHOT_INVALID",
+      `Desktop UI screenshot must be a regular PNG file: ${path}`,
+    );
+  }
+  const bytes = await readFile(path);
+  if (!isPng(bytes)) {
+    throw new ToolCodexError(
+      "DESKTOP_UI_SCREENSHOT_INVALID",
+      `Desktop UI screenshot is not a PNG file: ${path}`,
+    );
+  }
+  const sha256 = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   return {
-    available: true,
-    identityMatches: identityMatch,
-    reasonCode: identityMatch && report.status === "PASS"
-      ? null
-      : report.reasonCode ?? "DESKTOP_HOST_LOAD_MISMATCH",
-    reportPath,
-    runMatches,
-    status: identityMatch && report.status === "PASS" ? "PASS" : "FAIL",
+    matches: sha256 === expectedDigest,
+    mediaType: "image/png",
+    path,
+    sha256,
+    size: bytes.byteLength,
   };
 }
 
-function evaluateAutomatedInvocation(
-  report: ToolCodexAutomatedInvocationReportV1 | null,
-  reportPath: string,
-  buildIdentity: DistributionIdentityV1,
-  host: ToolCodexStatus,
-): ToolCodexEvidenceEvaluation {
-  if (report == null) return unavailableEvidence(reportPath, "EVIDENCE_NOT_CAPTURED");
-  const identityMatch = identityMatches(buildIdentity, report.identity);
-  const runMatches = host.marker != null
-    && report.provenance.desktopRunId === host.marker.runId
-    && report.provenance.desktopRootPid === host.marker.rootPid
-    && report.provenance.desktopRootStartedAt === host.marker.rootStartedAt;
-  if (!runMatches) return unavailableEvidence(reportPath, "STALE_FOR_CURRENT_RUN");
-  return {
-    available: true,
-    identityMatches: identityMatch,
-    reasonCode: identityMatch && report.status === "PASS"
-      ? null
-      : report.reasonCode ?? "AUTOMATED_INVOCATION_MISMATCH",
-    reportPath,
-    runMatches,
-    status: identityMatch && report.status === "PASS" ? "PASS" : "FAIL",
-  };
+async function writeScreenshotEvidence(path: string, bytes: Buffer): Promise<void> {
+  const existing = await lstat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (existing?.isSymbolicLink() === true) {
+    throw new ToolCodexError(
+      "DESKTOP_UI_SCREENSHOT_INVALID",
+      `Desktop UI evidence path must not be a symbolic link: ${path}`,
+    );
+  }
+  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, bytes, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    await rename(temporaryPath, path);
+    await chmod(path, 0o600);
+  } catch (error) {
+    await unlink(temporaryPath).catch((cleanupError: NodeJS.ErrnoException) => {
+      if (cleanupError.code !== "ENOENT") throw cleanupError;
+    });
+    throw error;
+  }
 }
 
-function evaluateDesktopUiObservation(
-  observation: ToolCodexDesktopUiObservationV1 | null,
+async function evaluateDesktopUiObservation(
+  observation: ToolCodexDesktopUiObservationV2 | null,
   reportPath: string | null,
   buildIdentity: DistributionIdentityV1,
   host: ToolCodexStatus,
-): ToolCodexEvidenceEvaluation {
-  if (observation == null) return unavailableEvidence(reportPath);
+  expectedTool: ToolCodexDesktopUiObservationV2["tool"],
+): Promise<ToolCodexEvidenceEvaluation> {
+  if (observation == null) {
+    return unavailableEvidence(reportPath, "OPERATOR_SCREENSHOT_REQUIRED");
+  }
   const identityMatch = identityMatches(
     buildIdentity,
     observation.structuredContent.identity,
   );
+  const capturedAt = Date.parse(observation.capturedAt);
+  const markerStartedAt = host.marker == null
+    ? Number.NaN
+    : Date.parse(host.marker.startedAt);
   const runMatches = host.marker != null
-    && observation.provenance.runId === host.marker.runId;
-  if (!runMatches) return unavailableEvidence(reportPath, "STALE_FOR_CURRENT_RUN");
+    && observation.provenance.runId === host.marker.runId
+    && capturedAt >= markerStartedAt;
+  const toolMatches = observation.tool === expectedTool;
+  const screenshotPath = resolve(
+    reportPath == null ? process.cwd() : dirname(reportPath),
+    observation.screenshot.path,
+  );
+  let screenshot: ToolCodexEvidenceEvaluation["screenshot"] = null;
+  let screenshotMatches = false;
+  let screenshotReason: string | null = null;
+  try {
+    const inspected = await inspectToolCodexDesktopScreenshot(
+      screenshotPath,
+      observation.screenshot.sha256,
+    );
+    screenshot = {
+      mediaType: inspected.mediaType,
+      path: inspected.path,
+      sha256: inspected.sha256,
+      size: inspected.size,
+    };
+    screenshotMatches = inspected.matches;
+    if (!inspected.matches) screenshotReason = "DESKTOP_UI_SCREENSHOT_DIGEST_MISMATCH";
+  } catch (error) {
+    screenshotReason = error instanceof ToolCodexError
+      ? error.code
+      : "DESKTOP_UI_SCREENSHOT_UNAVAILABLE";
+  }
+  if (!runMatches) {
+    return {
+      available: false,
+      capturedAt: observation.capturedAt,
+      identityMatches: identityMatch,
+      outcome: observation.outcome,
+      reasonCode: "STALE_FOR_CURRENT_RUN",
+      reportPath,
+      runMatches,
+      screenshot,
+      screenshotMatches,
+      status: null,
+      toolMatches,
+    };
+  }
+  const reasonCode = observation.outcome === "FAIL"
+    ? "OPERATOR_REPORTED_DESKTOP_FAILURE"
+    : !identityMatch
+      ? "DESKTOP_UI_IDENTITY_MISMATCH"
+      : !toolMatches
+        ? "DESKTOP_UI_TOOL_MISMATCH"
+        : screenshotReason;
+  const passed = reasonCode == null && screenshotMatches;
   return {
     available: true,
+    capturedAt: observation.capturedAt,
     identityMatches: identityMatch,
-    reasonCode: identityMatch ? null : "DESKTOP_UI_IDENTITY_MISMATCH",
+    outcome: observation.outcome,
+    reasonCode,
     reportPath,
     runMatches,
-    status: identityMatch ? "PASS" : "FAIL",
+    screenshot,
+    screenshotMatches,
+    status: passed ? "PASS" : "FAIL",
+    toolMatches,
   };
+}
+
+type RecordToolCodexDesktopUiObservationOptions = {
+  appPath?: string;
+  buildReportPath: string;
+  codexBin?: string;
+  operator: string;
+  outcome?: "PASS" | "FAIL";
+  outputPath?: string;
+  paths: ToolCodexPaths;
+  screenshotPath: string;
+  tool: ToolCodexDesktopUiObservationV2["tool"];
+};
+
+async function recordToolCodexDesktopUiObservationUnlocked(
+  options: RecordToolCodexDesktopUiObservationOptions,
+): Promise<ToolCodexDesktopUiObservationV2> {
+  if (options.operator.trim().length === 0) {
+    throw new ToolCodexError(
+      "OPERATOR_REQUIRED",
+      "record-ui requires a non-empty operator",
+    );
+  }
+  if (
+    options.tool !== "get_open_design_status"
+    && options.tool !== "ensure_open_design_runtime"
+  ) {
+    throw new ToolCodexError(
+      "DESKTOP_UI_TOOL_INVALID",
+      "record-ui tool must be get_open_design_status or ensure_open_design_runtime",
+    );
+  }
+  const buildReportPath = resolve(options.buildReportPath);
+  const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
+  const host = await inspectToolCodexEnvironment({
+    appPath: options.appPath,
+    codexBin: options.codexBin ?? "codex",
+    paths: options.paths,
+  });
+  if (host.state !== "running-controlled" || host.marker == null) {
+    throw new ToolCodexError(
+      "CONTROLLED_DESKTOP_REQUIRED",
+      "record-ui requires the current namespaced controlled Desktop run",
+    );
+  }
+  const screenshotPath = resolve(options.screenshotPath);
+  if (extname(screenshotPath).toLowerCase() !== ".png") {
+    throw new ToolCodexError(
+      "DESKTOP_UI_SCREENSHOT_INVALID",
+      "record-ui requires a PNG screenshot",
+    );
+  }
+  const screenshotInfo = await stat(screenshotPath);
+  if (screenshotInfo.mtimeMs < Date.parse(host.marker.startedAt)) {
+    throw new ToolCodexError(
+      "DESKTOP_UI_SCREENSHOT_STALE",
+      "the screenshot predates the current controlled Desktop run",
+    );
+  }
+  const screenshot = await inspectToolCodexDesktopScreenshot(screenshotPath, "");
+  const outputPath = resolveToolCodexReportPath(
+    options.paths,
+    options.outputPath ?? options.paths.desktopUiObservationPath,
+  );
+  const recordedScreenshotPath = join(dirname(outputPath), "desktop-ui.png");
+  await mkdir(dirname(recordedScreenshotPath), { recursive: true, mode: 0o700 });
+  await writeScreenshotEvidence(recordedScreenshotPath, await readFile(screenshotPath));
+  const observation: ToolCodexDesktopUiObservationV2 = {
+    capturedAt: screenshotInfo.mtime.toISOString(),
+    outcome: options.outcome ?? "PASS",
+    provenance: {
+      kind: "operator-captured-desktop-ui",
+      operator: options.operator.trim(),
+      runId: host.marker.runId,
+    },
+    schemaVersion: TOOL_CODEX_DESKTOP_UI_OBSERVATION_SCHEMA_VERSION,
+    screenshot: {
+      mediaType: screenshot.mediaType,
+      path: "desktop-ui.png",
+      sha256: screenshot.sha256,
+    },
+    server: "open-design",
+    structuredContent: {
+      identity: buildReport.identity,
+    },
+    tool: options.tool,
+  };
+  await writeToolCodexReport(options.paths, outputPath, observation);
+  return observation;
+}
+
+export async function recordToolCodexDesktopUiObservation(
+  options: RecordToolCodexDesktopUiObservationOptions,
+): Promise<ToolCodexDesktopUiObservationV2> {
+  const lock = await acquireToolCodexGlobalLock(options.paths, "record-ui");
+  try {
+    return await recordToolCodexDesktopUiObservationUnlocked(options);
+  } finally {
+    await lock.release();
+  }
 }
 
 export async function runToolCodexAcceptance(options: {
   appPath?: string;
-  automatedInvocationReportPath?: string;
   buildReportPath: string;
   codexBin?: string;
-  desktopHostLoadReportPath?: string;
   desktopUiObservationPath?: string;
-  fixtureReportUrl?: string;
   outputPath?: string;
   paths: ToolCodexPaths;
-  runtimeBinding?: ToolCodexRuntimeBinding | null;
 }): Promise<ToolCodexAcceptanceReport> {
-  await readToolCodexSentinel(options.paths);
+  const sentinel = await readToolCodexSentinel(options.paths);
+  const runtimeBinding = runtimeBindingFromPreparedState(sentinel.prepared);
+  const fixtureReportUrl = sentinel.prepared?.runtime?.fixtureReportUrl
+    ?? undefined;
   const buildReportPath = resolve(options.buildReportPath);
   const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
   const { marketplaceName } = await readMarketplace(buildReport);
@@ -875,8 +1268,8 @@ export async function runToolCodexAcceptance(options: {
   try {
     stdioStatus = await probeStdio(
       buildReport,
-      options.fixtureReportUrl,
-      options.runtimeBinding,
+      fixtureReportUrl,
+      runtimeBinding,
     );
     stdioProbePassed = true;
   } catch (error) {
@@ -885,133 +1278,32 @@ export async function runToolCodexAcceptance(options: {
     };
   }
 
-  const desktopHostLoadReportPath = resolve(
-    options.desktopHostLoadReportPath ?? options.paths.desktopHostLoadReportPath,
+  const desktopUiObservationPath = resolve(
+    options.desktopUiObservationPath ?? options.paths.desktopUiObservationPath,
   );
-  const automatedInvocationReportPath = resolve(
-    options.automatedInvocationReportPath ?? options.paths.invocationReportPath,
-  );
-  let desktopHostLoadReport: ToolCodexDesktopHostLoadReportV1 | null = null;
-  let automatedInvocationReport: ToolCodexAutomatedInvocationReportV1 | null = null;
+  let desktopUiObservation: ToolCodexDesktopUiObservationV2 | null = null;
   try {
-    const value = await optionalReport(desktopHostLoadReportPath);
-    desktopHostLoadReport = value == null
-      ? null
-      : parseToolCodexDesktopHostLoadReport(value);
-  } catch {
-    desktopHostLoadReport = {
-      buildReportPath,
-      checks: {
-        appServerDescendsFromRoot: false,
-        appServerHomeStampMatches: false,
-        appServerRunStampMatches: false,
-        cachedIdentityMatches: false,
-        desktopClientObserved: false,
-        pluginCwdMatchesExpected: false,
-        pluginHomeStampMatches: false,
-        pluginDescendsFromAppServer: false,
-        pluginRunStampMatches: false,
-        preparedIdentityMatches: false,
-        rootControlled: false,
-      },
-      expectedPluginCacheRoot: "",
-      generatedAt: new Date().toISOString(),
-      identity: buildReport.identity,
-      logEvidence: null,
-      processes: {
-        appServer: null,
-        pluginMcp: null,
-        root: {
-          command: "",
-          cwd: null,
-          pid: 0,
-          ppid: 0,
-          startedAt: null,
-        },
-      },
-      provenance: {
-        kind: "desktop-host-load",
-        observationKind: "process-chain",
-        rootPid: host.marker?.rootPid ?? 0,
-        rootStartedAt: host.marker?.rootStartedAt ?? "",
-        runId: host.marker?.runId ?? "",
-      },
-      reasonCode: "DESKTOP_HOST_LOAD_REPORT_INVALID",
-      schemaVersion: 1,
-      status: "FAIL",
-    };
-  }
-  try {
-    const value = await optionalReport(automatedInvocationReportPath);
-    automatedInvocationReport = value == null
-      ? null
-      : parseToolCodexAutomatedInvocationReport(value);
-  } catch {
-    automatedInvocationReport = {
-      attempts: [],
-      buildReportPath,
-      generatedAt: new Date().toISOString(),
-      identity: buildReport.identity,
-      provenance: {
-        approvalPolicy: "on-request",
-        approvalsReviewer: "auto_review",
-        desktopRootPid: host.marker?.rootPid ?? 0,
-        desktopRootStartedAt: host.marker?.rootStartedAt ?? "",
-        desktopRunId: host.marker?.runId ?? "",
-        ephemeral: true,
-        invocationId: "",
-        kind: "codex-exec-jsonl",
-        sandbox: "read-only",
-        workspace: options.paths.workspaceRoot,
-      },
-      reasonCode: "AUTOMATED_INVOCATION_REPORT_INVALID",
-      schemaVersion: TOOL_CODEX_INVOCATION_SCHEMA_VERSION,
-      status: "FAIL",
-      successfulAttempt: null,
-    };
-  }
-  const desktopUiObservationPath = options.desktopUiObservationPath == null
-    ? null
-    : resolve(options.desktopUiObservationPath);
-  let desktopUiObservation: ToolCodexDesktopUiObservationV1 | null = null;
-  if (desktopUiObservationPath != null) {
     desktopUiObservation = parseToolCodexDesktopUiObservation(
       await readJson(desktopUiObservationPath),
     );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  const expectedTool = runtimeBinding == null
+    ? "get_open_design_status"
+    : "ensure_open_design_runtime";
   const evidence = {
-    automatedInvocation: evaluateAutomatedInvocation(
-      automatedInvocationReport,
-      automatedInvocationReportPath,
-      buildReport.identity,
-      host,
-    ),
-    desktopHostLoaded: evaluateDesktopHostLoad(
-      desktopHostLoadReport,
-      desktopHostLoadReportPath,
-      buildReport.identity,
-      host,
-    ),
-    desktopUiObserved: evaluateDesktopUiObservation(
+    desktopUiObserved: await evaluateDesktopUiObservation(
       desktopUiObservation,
       desktopUiObservationPath,
       buildReport.identity,
       host,
+      expectedTool,
     ),
   };
   const signals: ToolCodexAcceptanceSignals = {
     artifactValid,
-    automatedInvocation: evidence.automatedInvocation.status === "PASS"
-      ? true
-      : evidence.automatedInvocation.status === "FAIL"
-        ? false
-        : null,
     desktopControlled: host.desktop.controlled,
-    desktopHostLoaded: evidence.desktopHostLoaded.status === "PASS"
-      ? true
-      : evidence.desktopHostLoaded.status === "FAIL"
-        ? false
-        : null,
     desktopRunning: host.desktop.roots.length === 1,
     desktopUiObserved: evidence.desktopUiObserved.status === "PASS"
       ? true
@@ -1038,13 +1330,10 @@ export async function runToolCodexAcceptance(options: {
   if (signals.desktopRunning !== true || signals.desktopControlled !== true) {
     checkpoints.push("Start one controlled Desktop instance for this environment.");
   }
-  if (signals.desktopHostLoaded == null) {
+  if (signals.desktopUiObserved == null) {
     checkpoints.push(
-      "Start Desktop with --build-report or run capture-host-load for this build.",
+      `Call ${expectedTool} in Desktop, capture a PNG screenshot, then run tools-codex record-ui.`,
     );
-  }
-  if (signals.automatedInvocation == null) {
-    checkpoints.push("Run tools-codex invoke for the same controlled Desktop run.");
   }
   const report: ToolCodexAcceptanceReport = {
     buildReportPath,
@@ -1055,6 +1344,7 @@ export async function runToolCodexAcceptance(options: {
     observations: {
       cliVersion: host.cli.version,
       desktopVersion: host.desktop.version,
+      expectedTool,
       marketplaceName,
       stdioStatus,
     },

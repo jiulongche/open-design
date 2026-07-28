@@ -117,11 +117,12 @@ const cli = cac("tools-pack");
 
 cli
   .command("codex-plugin <action>", "Codex plugin commands: build")
+  .option("--carrier-path <path>", "alternate host-native Node 24 executable embedded into the plugin artifact")
   .option("--channel <channel>", "OD runtime channel: stable|beta|betas|prerelease|preview")
   .option("--dir <path>", "tools-pack output root directory")
   .option("--json", "print JSON")
   .option("--namespace <name>", "tool-managed artifact namespace")
-  .option("--node-path <path>", "macOS arm64 Node executable for managed fallback")
+  .option("--platform <target>", "host-native plugin target: darwin-arm64|win32-x64")
   .option("--protocol-version <version>", "OD runtime protocol version")
   .option("--runtime-digest <digest>", "OD runtime sha256 digest")
   .option("--runtime-version <version>", "OD runtime version")

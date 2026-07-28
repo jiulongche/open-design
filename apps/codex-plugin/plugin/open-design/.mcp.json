@@ -3,19 +3,20 @@
     "open-design": {
       "title": "Open Design",
       "description": "Expose the Open Design distribution identity and runtime bridge.",
-      "command": "/bin/sh",
+      "command": "./bin/node",
       "args": [
-        "./bootstrap.sh",
+        "./mcp/server.mjs",
         "--identity-file",
         "./distribution.json"
       ],
       "cwd": ".",
       "env_vars": [
-        "OD_CODEX_PLUGIN_ENVIRONMENT_MANIFEST_URL",
         "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
         "OD_DATA_DIR",
         "OD_DISTRIBUTION_CHANNEL_ROOT"
-      ]
+      ],
+      "startup_timeout_sec": 10,
+      "tool_timeout_sec": 120
     }
   }
 }

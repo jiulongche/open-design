@@ -1,380 +1,378 @@
 # Codex plugin local distribution and Desktop acceptance
 
-This harness validates the Codex plugin as a distribution shell homologous to
-the packaged Open Design Desktop shell:
+The Codex plugin is a distribution shell parallel to packaged Open Design:
 
 ```text
-shared OD suite substrate
-├── channel + namespace
-├── shared namespace data
-├── Desktop shell: packaged + desktop lifecycle
-└── Codex shell: codex-plugin/{environment,runtime,updates,cache,logs,state}
-
 shared coordinate: channel + namespace + data
-shell coordinate: shellType + shellVersion + shellDigest
+shell identity: shellType + shellVersion + shellDigest
+
+platform plugin artifact
+├── .mcp.json
+├── Node 24 execution carrier
+├── MCP bundle
+├── skills/assets
+└── distribution.json
+
+external product runtime store
+├── acquisition manifest
+├── immutable versions
+├── lease
+├── binding + active pointer
+└── ready handoff journal
 ```
 
-The Codex plugin is distributed independently from Open Design Desktop. It does
-not require an installed Open Design app or consume Desktop-only lifecycle
-state. Once configured for the same channel root and namespace, both shells
-resolve the same final daemon data root. Environment, runtime, update, cache,
-log, state, lease, exit, and heartbeat lifecycle remain distribution-owned.
+The shell artifact is installed and updated only through Codex plugin native
+capabilities. It does not download Node or another shell environment before
+MCP initialize. Product runtime acquisition starts only when
+`ensure_open_design_runtime` is called and does not affect plugin ZIP size.
 
-The macOS arm64 bootstrap is a Node-independent `/bin/sh` compatibility entry.
-It accepts an explicit suite binding through
-`--distribution-channel-root <absolute-path>` or
-`OD_DISTRIBUTION_CHANNEL_ROOT`; without one it derives the matching packaged
-channel root under `~/Library/Application Support`. It resolves the identity's namespace with
-`packages/distribution-proto`, including the same `OD_DATA_DIR` scoping rules
-as packaged. Before MCP starts it revalidates the Codex-bundled Node by exact
-bundle path, OpenAI Team ID, arm64 architecture, and Node 24 version. If that
-candidate is unavailable, it synchronously downloads the managed immutable
-Node from `OD_CODEX_PLUGIN_ENVIRONMENT_MANIFEST_URL`, verifies size/digest,
-and atomically activates it. User PATH Node is never a correctness path.
-Runtime acquisition uses `OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL`, defaulting to
-`https://releases.open-design.ai/codex-plugin/<channel>/latest/runtime.json`.
-The plugin `.mcp.json` explicitly forwards these variables (plus optional
-`OD_DATA_DIR`) into its stdio server; arbitrary host environment is not
-implicitly inherited by plugin MCP processes.
+## Platform targets
 
-The MCP catalog is static from initialize: `get_open_design_status` remains
-read-only, while `ensure_open_design_runtime` lazily acquires or attaches the
-exact runtime. Acquisition uses the Codex-owned runtime store and lease below
-`namespaces/<namespace>/codex-plugin/`, writes a handoff journal, starts the runtime
-detached, validates its one-time ready-file token digest and loopback identity,
-then advances the Codex-owned binding and active pointer. Runtime manifests use
-launcher-style `control.codexPlugin.version.min`; an older shell falls back to
-the last installed compatible runtime.
+`tools-pack codex-plugin build` produces one platform-specific marketplace:
 
-## Ownership and safety model
+- `darwin-arm64` → `./bin/node`
+- `win32-x64` → `./bin/node.exe`
 
-`tools-pack` builds a relocatable local Codex marketplace plus a deterministic
-acceptance-only runtime probe artifact. `tools-serve` validates and serves that
-artifact with an identity-bound acquisition manifest. `tools-codex` owns the
-Codex Desktop acceptance lifecycle and the host-independent handoff probe.
+The MCP entry is relative to the installed plugin cache, does not use user
+`PATH`, and declares:
 
-Each acceptance environment lives at:
+- startup timeout: 10 seconds;
+- tool timeout: 120 seconds;
+- forwarded runtime inputs:
+  `OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL`, `OD_DATA_DIR`,
+  `OD_DISTRIBUTION_CHANNEL_ROOT`.
 
-```text
-~/.od/tools-codex/<environment-namespace>/
-├── codex-home/       # dedicated CODEX_HOME
-├── workspace/        # Desktop launch workspace
-├── reports/          # machine-readable acceptance evidence
-├── runs/             # run-local artifacts
-└── namespace.json    # ownership and prepared-plugin state
-```
+Controlled Desktop acceptance supports macOS and native x64 Windows. The
+Windows lane includes artifact build, offline stdio, marketplace
+install/update, MSIX/process discovery, and controlled Desktop lifecycle. Both
+platforms use the same operator-driven Desktop acceptance contract. The native
+`win32-x64` reader returns only explicitly requested environment stamps;
+failure yields no ownership evidence.
 
-The environment namespace is a stable local operations identity. It is
-deliberately independent from the distribution namespace recorded in a plugin
-build report, so one environment can be reused across successive builds.
+## Build a local marketplace
 
-The harness uses the real Codex Desktop installation and existing OS login
-resources, but isolates Codex-owned file state through the dedicated
-`CODEX_HOME`. This is not a complete application sandbox: Desktop may still
-write host-level crash-reporting or framework state outside `CODEX_HOME`.
-
-Safety rules:
-
-- At most one Codex Desktop root instance may exist during acceptance.
-- `start` fails before mutation if any Desktop root is already present.
-- A controlled root receives an environment stamp and is recorded in a run
-  marker.
-- `stop` only targets the exact stamped root and its stamped helpers.
-- Unknown process-enumeration state fails closed.
-- Normal cleanup never removes credentials.
-- Whole-environment deletion requires the exact canonical namespace path.
-
-## Build the local marketplace
-
-Channel is an explicit authoritative input. Runtime version must match it.
-Plugin shell version is independent and defaults to `apps/codex-plugin`'s
-package version.
+Channel and runtime version are authoritative inputs. Shell version defaults to
+`apps/codex-plugin/package.json`.
 
 ```bash
 pnpm tools-pack codex-plugin build \
   --channel stable \
   --namespace codex-smoke-build \
+  --platform win32-x64 \
+  --carrier-path <node-24-executable> \
   --runtime-version 0.16.1 \
   --protocol-version 1 \
-  --node-path /Applications/Codex.app/Contents/Resources/cua_node/bin/node \
   --json
 ```
 
-The default report is:
+When the build host matches a supported target, `--platform` defaults to that
+host and `--carrier-path` defaults to `process.execPath`. Builds must run on
+the target host because the builder executes the carrier to verify Node 24 and
+the exact platform architecture.
+
+The report path is:
 
 ```text
-.tmp/tools-pack/out/codex-plugin/namespaces/<namespace>/build-report.json
+.tmp/tools-pack/out/codex-plugin/namespaces/<namespace>/<platform>/build-report.json
 ```
 
-Its `paths.artifactRoot` is the local marketplace root and
-`runtimeArtifact` records the exact generated runtime bytes, digest, entry
-path, and size. The runtime digest in the identity is calculated from those
-bytes; `--runtime-digest` is an optional assertion, not a second source of
-truth. Paths inside the
-plugin manifest and MCP config remain package-relative; absolute paths exist
-only in the tool report. Generated marketplaces use `authentication: ON_USE`,
-which is accepted by current Codex plugin validation while preserving the
-plugin's explicit runtime boundary.
+`paths.artifactRoot` is the relocatable marketplace.
+`runtimeArtifact` is an acceptance-only external runtime fixture, not plugin
+shell content. `artifact.files` includes the platform carrier and excludes the
+generated `distribution.json`; the identity binds its digest as
+`shellDigest`.
 
-## Serve and probe the runtime handoff
+## Offline shell gate
 
-Start the loopback fixture in a dedicated terminal:
+Before Desktop acceptance:
+
+1. Verify the build report and artifact inventory.
+2. Read the artifact's `.mcp.json`.
+3. Confirm the command is a relative verified artifact entry.
+4. Start from `paths.shellRoot` with network unavailable and no PATH Node.
+5. Require initialize, `tools/list`, and `get_open_design_status` within
+   10 seconds.
+6. Confirm the returned identity exactly matches the build report.
+
+`tools-codex` performs this probe from the declared artifact entry. It must not
+replace the command with `/bin/sh`, system Node, or a Codex-internal Node.
+
+## Runtime fixture and handoff
+
+Start the identity-bound loopback fixture:
 
 ```bash
 pnpm tools-serve start codex-plugin \
-  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
+  --build-report <build-report> \
   --json
 ```
 
-The JSON result contains `environmentManifestUrl` and `runtimeManifestUrl`;
-both use release-compatible `codex-plugin/<channel>/...` paths. `/report` remains the
-shell-identity fixture consumed by the status path. Use one explicit absolute
-channel root for the shared suite:
+The result exposes `runtimeManifestUrl`; `/report` remains the status fixture.
+The fixture no longer serves an environment/Node artifact.
+
+After the managed environment is initialized and the matching plugin is
+prepared as described below, probe runtime acquisition:
 
 ```bash
 pnpm tools-codex handoff \
-  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
+  --namespace desktop-smoke \
+  --build-report <build-report> \
   --distribution-channel-root <absolute-shared-channel-root> \
-  --environment-manifest-url <environmentManifestUrl> \
   --runtime-manifest-url <runtimeManifestUrl> \
   --fixture-report-url <endpoint-origin>/report \
   --json
 ```
 
-The first call must return a confirmed handoff. A repeated call must return
-`attached: true` for the same exact binding. If the runtime owner later exits,
-the next call may remove only that dead binding while holding the Codex lease,
-reuse the immutable artifact, and advance the pointer generation. A live but
-unobservable or incompatible binding quick-fails instead of being replaced.
+The first call downloads and verifies the external runtime, writes it under the
+immutable runtime store, starts it, validates the one-time ready token and
+loopback identity, then confirms the binding/pointer. A repeated call attaches
+to the compatible binding. A successful handoff records the exact runtime
+binding under the prepared plugin state. Replacing the prepared plugin clears
+that binding.
 
-## Initialize and inspect an acceptance environment
+A live incompatible or unobservable binding fails closed. A dead binding may
+be replaced only while holding the runtime lease. Concurrent acquisition must
+eventually use bounded observe-and-attach rather than stealing a live lease.
 
-Choose a stable environment namespace and reuse it across builds:
+## Non-Desktop runtime lifecycle gate
+
+Desktop acceptance proves that the installed plugin is visible and usable in
+the real UI. It is not the runtime updater test harness. Verify the external
+runtime lifecycle with:
+
+- a target-host `tools-pack codex-plugin build` for each runtime fixture;
+- one isolated, authenticated `CODEX_HOME` with the packed plugin installed;
+- one task-owned `OD_DISTRIBUTION_CHANNEL_ROOT`;
+- a loopback `tools-serve` Codex plugin fixture;
+- real `codex --enable plugins exec --json` calls to
+  `ensure_open_design_runtime`.
+
+The fixture's programmatic `promote` operation keeps the same
+`runtimeManifestUrl`, loads and validates the next build report before
+switching `latest`, and continues serving all earlier immutable artifact URLs.
+It rejects channel/namespace/protocol or shell identity drift, and rejects
+different bytes published at an existing runtime version URL.
+
+The required lifecycle sequence is:
+
+1. Acquire N through the installed plugin and confirm its manifest, binding,
+   active pointer, immutable store entry, and ready handoff.
+2. While N remains alive in the same Codex CLI host, promote `latest` to N+1
+   and require the next ensure call to fail closed on the identity mismatch.
+3. Exit that host, start a new isolated CLI call, recover its stale binding,
+   acquire N+1, and retain both immutable version directories.
+4. In one live CLI host, call ensure twice for N+1 and require the second call
+   to return `attached:true` and `reusedArtifact:true`.
+5. Promote to a validly hashed runtime that exits before ready; require the
+   tool call to fail and the active pointer to remain on N+1 with no live
+   binding or temporary handoff state.
+6. Serve a newer manifest whose minimum shell version excludes the installed
+   shell; require selection and startup of the newest compatible installed
+   runtime instead.
+
+An ephemeral `codex exec` host ends its plugin/runtime process tree when the
+CLI exits. Live-owner and attach checks therefore use consecutive tool calls
+inside one CLI process; separate CLI calls intentionally exercise stale-owner
+recovery. Preserve Codex JSONL, fixture identity, `active.json`, binding
+evidence, and immutable store inventory as the acceptance record. No UI
+screenshot is required for this non-Desktop gate.
+
+## Managed acceptance environment
+
+Each environment lives under:
+
+```text
+~/.od/tools-codex/<environment-namespace>/
+├── codex-home/
+├── desktop-user-data/
+├── workspace/
+├── reports/
+├── runs/
+└── sentinel.json
+```
+
+The environment namespace is independent from the distribution namespace.
+Initialization never edits the default `~/.codex/config.toml` or adopts a
+non-empty unowned directory.
 
 ```bash
 pnpm tools-codex init --namespace desktop-smoke
 pnpm tools-codex status --namespace desktop-smoke --json
 ```
 
-Initialization creates only a minimal owned directory structure and sentinel.
-It does not edit the user's default `~/.codex/config.toml`. A non-empty,
-unowned namespace directory is rejected instead of adopted implicitly.
-
-On first use, check the `login` field in `status`. If the isolated home needs
-authentication, log in explicitly with that home:
+If login is required:
 
 ```bash
 CODEX_HOME="$HOME/.od/tools-codex/desktop-smoke/codex-home" codex login
 ```
 
-Login state is retained across ordinary prepare, cache, plugin, and run
-cleanup. Credential removal is always an explicit layer.
+Windows controlled start requires a ChatGPT login in the managed home:
 
-## Prepare the generated plugin
+```powershell
+$env:CODEX_HOME = "$HOME\\.od\\tools-codex\\desktop-smoke\\codex-home"
+codex login
+```
+
+`tools-codex start` fails with `DESKTOP_LOGIN_REQUIRED` before opening
+Desktop when this precondition is missing.
+
+Prepare while Desktop is stopped:
 
 ```bash
 pnpm tools-codex prepare \
   --namespace desktop-smoke \
-  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
+  --build-report <build-report> \
   --json
 ```
 
-`prepare` validates the build report and marketplace, then installs the
-marketplace and plugin into the dedicated `CODEX_HOME`. Repeating it with the
-same build is idempotent. A changed build replaces only the marketplace/plugin
-previously recorded by that namespace sentinel.
+Preparation verifies the artifact, adds the marketplace, and installs the
+plugin into the dedicated home. Repeating the same build is idempotent; a new
+plugin version replaces the previous versioned cache through Codex itself.
+On Windows, preparation also computes the final cached MCP command path before
+install. Paths longer than 259 characters fail with
+`WINDOWS_PLUGIN_CACHE_PATH_TOO_LONG`; shorten the tools-codex state root,
+distribution namespace, or development shell version. Keep local cachebuster
+versions compact because the shell version is part of Codex's cache path.
 
-Preparation is blocked while any Codex Desktop root is running.
+## Controlled Desktop lane
 
-## Start and stop the controlled Desktop instance
-
-```bash
-pnpm tools-codex start --namespace desktop-smoke --json
-```
-
-The tool launches through the official `codex app` entrypoint with the
-namespace `CODEX_HOME`, a run stamp, the managed workspace, and the
-authoritative `--enable plugins` launch override. It does not persistently
-fight Codex-managed feature configuration.
-
-If an existing Desktop instance is detected, close it and retry. The tool will
-not attach to, restart, or terminate an unmanaged instance.
-
-For release acceptance, pass the prepared build report to `start`:
+On a supported macOS or native x64 Windows host:
 
 ```bash
 pnpm tools-codex start \
   --namespace desktop-smoke \
-  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
   --json
 ```
 
-When this run validates runtime handoff, append the same
-`--distribution-channel-root <absolute-shared-channel-root>`,
-`--environment-manifest-url <environmentManifestUrl>`, and
-`--runtime-manifest-url <runtimeManifestUrl>` triple used by the standalone
-probe. The controlled Desktop root and plugin MCP inherit the triple; no default
-Codex config file is edited.
+On macOS, the official `codex app` entry receives the isolated home, run id,
+home digest, workspace, and plugin feature override. On Windows, a restricted
+basic-user helper starts the exact installed MSIX `app\ChatGPT.exe` with
+process-local home/run inputs. The root receives both
+`CODEX_ELECTRON_USER_DATA_PATH` and the same explicit `--user-data-dir`, so
+Owl/Chromium and Electron stay inside `desktop-user-data/`. Start fails if any
+Desktop root already exists. The tool never adopts or stops an unmanaged
+instance.
 
-The controlled Desktop root is recorded first. The command then observes the
-Desktop app-server loading the prepared plugin and writes
-`reports/desktop-host-load.json`.
+`start` reads the runtime binding previously verified by `handoff`; it never
+accepts a manifest URL or distribution channel directly. If no verified
+binding exists, Desktop starts in the status-only lane.
 
-```text
-controlled Desktop root
-└── Desktop app-server
-    ├── exact inherited run/home stamp
-    ├── Codex Desktop client provenance
-    └── open-design plugin MCP initialization
-```
+While the run remains controlled, the operator opens a fresh Desktop chat and
+requests exactly one Open Design tool call:
 
-The harness captures a live app-server -> plugin MCP process chain when
-available. Because Desktop may initialize and terminate a plugin MCP before an
-external poll sees it, the durable fallback reads the managed app-server log
-for the exact current app-server PID, Desktop client version, plugin name, and
-shell version. The cached plugin's `distribution.json` must independently
-match the complete build identity. A log from another PID, Desktop run, home,
-version, or cache cannot satisfy the gate.
+- without runtime binding: `get_open_design_status`;
+- with runtime binding: `ensure_open_design_runtime`.
 
-If host-load observation needs to be retried without restarting Desktop:
+Capture a PNG screenshot that shows the Desktop surface, prompt, completed
+tool result, and complete distribution identity. Then bind the screenshot to
+the current controlled run and exact build:
 
 ```bash
-pnpm tools-codex capture-host-load \
+pnpm tools-codex record-ui \
   --namespace desktop-smoke \
-  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
+  --build-report <build-report> \
+  --screenshot <desktop-screenshot.png> \
+  --tool ensure_open_design_runtime \
+  --operator <operator-name> \
   --json
 ```
 
-`start` without `--build-report` remains available for initial login or host
-diagnosis. A host-load timeout does not authorize adoption or termination of
-an unmanaged instance.
+`record-ui` rejects a screenshot that predates the current run, verifies that
+it is a regular PNG, copies it into the managed reports directory, hashes it,
+and records explicit operator provenance, outcome, tool, run id, and build
+identity. It does not inspect or automate the Desktop UI; the operator owns the
+visual judgment.
 
-After the checkpoint:
+Finish acceptance:
+
+```bash
+pnpm tools-codex accept \
+  --namespace desktop-smoke \
+  --build-report <build-report> \
+  --json
+```
+
+`accept` consumes the same recorded binding and fixture report as `start`.
+Without a verified handoff it expects the status-only lane. It combines
+artifact inventory, offline stdio, installed plugin, current controlled host
+state, and the operator screenshot observation. Automated Desktop invocation,
+keyboard/mouse/clipboard automation, and internal host-load evidence are not
+acceptance requirements.
+
+Stop only the controlled run:
 
 ```bash
 pnpm tools-codex stop --namespace desktop-smoke --json
 ```
 
-Normal stop sends a graceful termination to stamped processes and then
-reconciles stamped orphan helpers. Use `--force` only when the reported
-controlled processes do not exit; force mode still cannot target an unstamped
-process.
+## Windows controlled-host gate
 
-## Run the automated plugin invocation
+Windows status resolves the installed package/AUMID, exact full-trust
+executable, root PID/PPID, command line, and creation time. A pre-existing
+instance returns `running-unmanaged`.
 
-While the same controlled Desktop run is active:
+The Windows ownership primitives also:
 
-```bash
-pnpm tools-codex invoke \
-  --namespace desktop-smoke \
-  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
-  --json
-```
+- read only requested run/home environment stamps from native x64 processes;
+- bind the exact package-local root executable, PID, creation time, managed
+  home, run stamp, and isolated Chromium user-data path.
 
-`invoke` runs an ephemeral, read-only `codex exec` against the same managed
-`CODEX_HOME`. It uses `approval_policy=on-request` with
-`approvals_reviewer=auto_review`, so side-effecting MCP calls retain their
-truthful annotations while eligible low/medium-risk approval requests can be
-reviewed without an operator click. Reviewer denial or failure remains a hard
-failure. Without runtime binding flags it accepts only one
-completed `open-design/get_open_design_status` call. With the same explicit
-channel-root/manifest pair, it instead requires exactly one completed
-`open-design/ensure_open_design_runtime` call. Both lanes require an exact
-structured shell identity and completed terminal turn. The report is written
-to `reports/automated-invocation.json`.
+Cold-host validation for Codex CLI 0.145.0 and Windows MSIX 26.721.4979.0
+established:
 
-Transient incomplete turns may be retried up to two attempts by default.
-Identity mismatch, duplicate target calls, explicit tool failure, and
-invocation-owned process residue are not treated as transient success. Every
-attempt carries a unique environment stamp so cleanup cannot target Desktop's
-own plugin process.
+- `codex app` opened the requested workspace through `codex://` activation,
+  but the resulting Desktop root and app-server had no `CODEX_HOME`, run id,
+  or home-digest stamp;
+- directly starting the exact package-local `app\ChatGPT.exe` produced the
+  same result when launched from an elevated caller because Owl de-elevation
+  discarded the temporary environment;
+- `runas /trustlevel:0x20000` creates a restricted same-user helper whose final
+  root preserves `CODEX_HOME`, run id, home digest, and runtime inputs for its
+  descendants;
+- `CODEX_ELECTRON_USER_DATA_PATH` alone does not isolate Owl's outer Chromium
+  profile;
+- pairing it with the same `--user-data-dir` produced isolated profile writes
+  and zero default-profile writes in the controlled run;
+- the controlled marker/start/status/stop lifecycle completed without forced
+  cleanup;
+- unauthenticated workspace deep-link startup rendered a blank `/` route, so
+  Windows start now requires prior ChatGPT login in the managed home.
 
-## Combine acceptance evidence
+The restricted helper is not a global compatibility shim: it consumes one
+run-scoped payload, writes one atomic non-admin handshake, and exits. No user
+environment, registry, scheduled task, marker backfill, or process adoption is
+allowed.
 
-Run:
+When an unstamped MSIX Desktop root exists, Windows `status` reports
+`running-unmanaged`, including roots whose exact `ChatGPT.exe` command contains
+app launch arguments. Only the operator may close that instance.
 
-```bash
-pnpm tools-codex accept \
-  --namespace desktop-smoke \
-  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
-  --json
-```
+## Operator UI checkpoint
 
-For a handoff run, pass the same channel-root/manifest pair again so the stdio
-acceptance probe validates the runtime tool as well as the saved Desktop and
-Codex-exec evidence.
+The operator screenshot is the authoritative Desktop product acceptance
+evidence on both macOS and Windows. Missing current-run screenshot evidence
+returns `OPERATOR_ACTION_REQUIRED`; it is not inferred from CLI output, logs,
+or process state.
 
-The default automated gate uses two independent evidence lanes:
+Do not use global keyboard/mouse/clipboard automation, delete chats, rewrite
+reports, or claim a PASS from an image that does not visibly show the prompt,
+completed tool result, and complete distribution identity.
 
-- `desktopHostLoaded`: current controlled Desktop run loaded the exact cached
-  plugin through its own app-server.
-- `automatedInvocation`: same run and managed home completed the exact plugin
-  tool call through Codex JSONL.
+## Statuses
 
-`desktopUiObserved` is optional low-frequency operator evidence. It never gets
-inferred from CLI output. If supplied through `--desktop-ui-observation`, it
-must use this provenance envelope:
+- `PASS` — artifact, stdio, installed plugin, controlled run, and the
+  operator-confirmed screenshot agree.
+- `OPERATOR_ACTION_REQUIRED` — machine checks do not show a product failure,
+  but login, controlled start, or current-run screenshot evidence is
+  incomplete.
+- `BLOCKED_BY_HOST_STATE` — Desktop/CLI is missing, unmanaged, multiple, or
+  unprovable.
+- `FAIL` — artifact, identity, MCP, screenshot digest/tool, or explicit
+  operator outcome is inconsistent.
 
-```json
-{
-  "schemaVersion": 1,
-  "capturedAt": "2026-07-27T12:00:00.000Z",
-  "provenance": {
-    "kind": "operator-captured-desktop-ui",
-    "runId": "<current tools-codex run id>"
-  },
-  "server": "open-design",
-  "tool": "get_open_design_status",
-  "structuredContent": {
-    "identity": {
-      "channel": "stable",
-      "namespace": "codex-smoke-build",
-      "protocolVersion": 1,
-      "runtimeDigest": "sha256:<64-lowercase-hex>",
-      "runtimeVersion": "0.16.1",
-      "shellDigest": "sha256:<64-lowercase-hex>",
-      "shellType": "codex-plugin",
-      "shellVersion": "0.1.0"
-    }
-  }
-}
-```
+## Cleanup
 
-Raw tool JSON without explicit Desktop run provenance is rejected instead of
-being allowed to masquerade as Desktop UI evidence. For a handoff UI
-checkpoint, the same envelope may use
-`"tool": "ensure_open_design_runtime"` while retaining the complete shell
-identity in `structuredContent.identity`.
-
-Possible statuses:
-
-- `PASS`: artifact/plugin checks pass and both current-run automated evidence
-  lanes exactly match the build identity.
-- `OPERATOR_ACTION_REQUIRED`: automated product checks pass, but login,
-  controlled start, host-load capture, or invocation evidence remains.
-- `BLOCKED_BY_HOST_STATE`: Codex CLI/Desktop is missing, an unmanaged Desktop
-  is running, or process state cannot be proven safe.
-- `FAIL`: the artifact, stdio MCP, prepared plugin, current-run evidence, or
-  explicitly supplied Desktop UI identity is inconsistent.
-
-Reports are retained under the namespace `reports/` directory.
-
-## Optional deterministic fixture
-
-For runtime-transport development, start the build-bound loopback fixture:
-
-```bash
-pnpm tools-serve start codex-plugin \
-  --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
-  --json
-```
-
-The dynamic port is transport-only and must not change channel, distribution
-namespace, versions, digests, protocol version, or artifact paths.
-
-## Layered cleanup
-
-Inspect status before cleanup, then select the narrowest layer:
+Use the narrowest layer:
 
 ```bash
 pnpm tools-codex clean --namespace desktop-smoke --layer runs
@@ -383,51 +381,26 @@ pnpm tools-codex clean --namespace desktop-smoke --layer cache
 pnpm tools-codex clean --namespace desktop-smoke --layer control
 ```
 
-Credential removal is separate:
-
-```bash
-pnpm tools-codex clean --namespace desktop-smoke --layer credentials
-```
-
-Deleting the entire environment requires exact-target confirmation:
-
-```bash
-pnpm tools-codex clean \
-  --namespace desktop-smoke \
-  --layer home \
-  --confirm-home "$HOME/.od/tools-codex/desktop-smoke"
-```
-
-Cleanup fails closed while Desktop root state is running or unknown. The
-`credentials` layer removes only the managed home's file credential; OS
-credential-store entries remain host-owned.
+Credential removal and whole-home deletion are explicit exceptional actions.
+Cleanup fails closed while Desktop state is running or unknown.
 
 ## Failure triage
 
-- Build report rejected: inspect channel/version consistency, digest form,
-  sorted inventory, and path containment.
-- Marketplace rejected: regenerate it and confirm the authentication policy is
-  `ON_USE`.
-- Stdio probe failed: run generated `mcp/server.mjs` from `paths.shellRoot`;
-  package-relative paths must survive copying the whole plugin elsewhere.
-- Start blocked: close every Codex Desktop root, then rerun `status`; never
-  bypass the singleton preflight with a manual process kill inside the tool.
-- Controlled stop incomplete: inspect the stamped PID list in the result,
-  retry with `--force`, and retain the namespace reports if helpers survive.
-- Host-load capture timeout: keep the controlled instance running, retry
-  `capture-host-load`, and inspect the report's process-chain checks before
-  treating it as a package defect.
-- Invocation failed: inspect attempt terminal state, target call count,
-  diagnostics, and residual cleanup. Retries intentionally do not mask identity
-  mismatch or duplicate tool calls.
-- Stale evidence: rerun `capture-host-load` and `invoke` for the current run;
-  reports from a previous controlled run are unavailable, not current proof.
-- Identity mismatch: retain the build report and all three reports. Do not
-  repair generated identity or evidence files by hand.
-
-## Current first-version boundary
-
-This proves the shell/distribution seam and establishes a repeatable Desktop
-acceptance control plane. Cloud/account flows, complete capability parity,
-runtime auto-update, bootstrap handoff, and `minCodexPluginVersion` remain
-follow-up phases.
+- Build report rejected: inspect channel/version, sorted inventory, digest, and
+  path containment.
+- MCP probe failed: inspect the generated relative command and carrier target;
+  do not substitute a host runtime.
+- Marketplace rejected: verify `ON_USE` policy and platform-specific report
+  path.
+- Start blocked: close every Desktop root and rerun status.
+- `DESKTOP_LOGIN_REQUIRED`: authenticate the managed `CODEX_HOME` with
+  ChatGPT, then retry start. Do not copy the default profile or auth file.
+- Blank Windows window from an older run: preserve its logs for diagnosis,
+  stop it only through its valid marker, authenticate the managed home, and
+  retry.
+- Screenshot rejected as stale: capture a new PNG during the current
+  controlled run and rerun `record-ui`.
+- Screenshot digest mismatch: retain the observation and image for diagnosis;
+  do not rewrite either file to force a PASS.
+- Identity mismatch: retain the build report and reports; never repair
+  generated identity by hand.

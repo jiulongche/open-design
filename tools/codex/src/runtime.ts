@@ -2,11 +2,13 @@ import { isAbsolute, resolve } from "node:path";
 
 import { CODEX_PLUGIN_ENV } from "@open-design/codex-plugin-proto";
 
-import { ToolCodexError } from "./state.js";
+import {
+  ToolCodexError,
+  type ToolCodexPreparedState,
+} from "./state.js";
 
 export type ToolCodexRuntimeBinding = {
   distributionChannelRoot: string;
-  environmentManifestUrl: string;
   runtimeManifestUrl: string;
 };
 
@@ -37,25 +39,19 @@ function normalizeRuntimeManifestUrl(value: string): string {
 
 export function resolveToolCodexRuntimeBinding(options: {
   distributionChannelRoot?: string;
-  environmentManifestUrl?: string;
   runtimeManifestUrl?: string;
 }): ToolCodexRuntimeBinding | null {
   const hasChannelRoot = options.distributionChannelRoot != null
     && options.distributionChannelRoot.length > 0;
   const hasManifestUrl = options.runtimeManifestUrl != null
     && options.runtimeManifestUrl.length > 0;
-  const hasEnvironmentManifestUrl = options.environmentManifestUrl != null
-    && options.environmentManifestUrl.length > 0;
-  if (
-    hasChannelRoot !== hasManifestUrl
-    || hasChannelRoot !== hasEnvironmentManifestUrl
-  ) {
+  if (hasChannelRoot !== hasManifestUrl) {
     throw new ToolCodexError(
       "RUNTIME_BINDING_INCOMPLETE",
-      "--distribution-channel-root, --environment-manifest-url, and --runtime-manifest-url must be provided together",
+      "--distribution-channel-root and --runtime-manifest-url must be provided together",
     );
   }
-  if (!hasChannelRoot || !hasManifestUrl || !hasEnvironmentManifestUrl) return null;
+  if (!hasChannelRoot || !hasManifestUrl) return null;
   const channelRoot = options.distributionChannelRoot!;
   if (!isAbsolute(channelRoot)) {
     throw new ToolCodexError(
@@ -65,11 +61,21 @@ export function resolveToolCodexRuntimeBinding(options: {
   }
   return {
     distributionChannelRoot: resolve(channelRoot),
-    environmentManifestUrl: normalizeRuntimeManifestUrl(
-      options.environmentManifestUrl!,
-    ),
     runtimeManifestUrl: normalizeRuntimeManifestUrl(options.runtimeManifestUrl!),
   };
+}
+
+export function runtimeBindingFromPreparedState(
+  prepared: ToolCodexPreparedState | undefined,
+): ToolCodexRuntimeBinding | null {
+  if (prepared?.runtime == null) return null;
+  if (prepared.runtime.identityKey !== prepared.identityKey) {
+    throw new ToolCodexError(
+      "RUNTIME_BINDING_IDENTITY_MISMATCH",
+      "verified runtime binding does not match the prepared plugin identity",
+    );
+  }
+  return resolveToolCodexRuntimeBinding(prepared.runtime);
 }
 
 export function toolCodexRuntimeEnv(
@@ -79,8 +85,6 @@ export function toolCodexRuntimeEnv(
   return {
     [CODEX_PLUGIN_ENV.DISTRIBUTION_CHANNEL_ROOT]:
       binding.distributionChannelRoot,
-    [CODEX_PLUGIN_ENV.ENVIRONMENT_MANIFEST_URL]:
-      binding.environmentManifestUrl,
     [CODEX_PLUGIN_ENV.RUNTIME_MANIFEST_URL]: binding.runtimeManifestUrl,
   };
 }

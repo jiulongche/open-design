@@ -103,6 +103,9 @@ describe("Codex plugin stdio MCP", () => {
       const resource = await client.readResource({
         uri: "od://distribution/identity",
       });
+      expect(await client.listResourceTemplates()).toEqual({
+        resourceTemplates: [],
+      });
       expect(resource.contents).toHaveLength(1);
       expect(JSON.parse(
         "text" in resource.contents[0]! ? resource.contents[0]!.text : "",

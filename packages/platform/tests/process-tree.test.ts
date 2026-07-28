@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   collectProcessTreePids,
+  listProcessSnapshotsStrict,
   processCommandExactlyRunsExecutable,
   stopProcesses,
   type ProcessSnapshot,
@@ -122,5 +123,20 @@ describe("stopProcesses", () => {
       }
     },
     5_000,
+  );
+});
+
+describe("Windows process snapshot evidence", () => {
+  it.runIf(process.platform === "win32")(
+    "includes the current executable path and UTC creation time",
+    async () => {
+      const current = (await listProcessSnapshotsStrict())
+        .find((entry) => entry.pid === process.pid);
+
+      expect(current?.executablePath?.toLowerCase()).toBe(
+        process.execPath.toLowerCase(),
+      );
+      expect(current?.startedAt).toMatch(/Z$/);
+    },
   );
 });
