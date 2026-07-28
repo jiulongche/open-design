@@ -5,40 +5,46 @@ the packaged Open Design Desktop shell:
 
 ```text
 shared OD suite substrate
-├── channel + namespace + canonical suite paths
-├── shared runtime/store + daemon data
-├── Desktop shell: packaged + desktop
-└── Codex shell: codex-plugin
+├── channel + namespace
+├── shared namespace data
+├── Desktop shell: packaged + desktop lifecycle
+└── Codex shell: codex-plugin/{environment,runtime,updates,cache,logs,state}
 
-shared coordinate: channel + namespace + runtimeVersion + runtimeDigest + protocolVersion
+shared coordinate: channel + namespace + data
 shell coordinate: shellType + shellVersion + shellDigest
 ```
 
 The Codex plugin is distributed independently from Open Design Desktop. It does
 not require an installed Open Design app or consume Desktop-only lifecycle
 state. Once configured for the same channel root and namespace, both shells
-resolve the same suite runtime/store and daemon data instead of maintaining
-parallel copies.
+resolve the same final daemon data root. Environment, runtime, update, cache,
+log, state, lease, exit, and heartbeat lifecycle remain distribution-owned.
 
-The current local bootstrap accepts an explicit suite binding through
+The macOS arm64 bootstrap is a Node-independent `/bin/sh` compatibility entry.
+It accepts an explicit suite binding through
 `--distribution-channel-root <absolute-path>` or
-`OD_DISTRIBUTION_CHANNEL_ROOT`. It then resolves the identity's namespace with
+`OD_DISTRIBUTION_CHANNEL_ROOT`; without one it derives the matching packaged
+channel root under `~/Library/Application Support`. It resolves the identity's namespace with
 `packages/distribution-proto`, including the same `OD_DATA_DIR` scoping rules
-as packaged. Without that binding, the read-only status tool reports
-`suite.configured: false`; runtime acquisition and handoff must not guess a
-different root. Runtime acquisition additionally requires
-`--runtime-manifest-url` or `OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL`; the two
-bindings are supplied together by the acceptance control plane.
+as packaged. Before MCP starts it revalidates the Codex-bundled Node by exact
+bundle path, OpenAI Team ID, arm64 architecture, and Node 24 version. If that
+candidate is unavailable, it synchronously downloads the managed immutable
+Node from `OD_CODEX_PLUGIN_ENVIRONMENT_MANIFEST_URL`, verifies size/digest,
+and atomically activates it. User PATH Node is never a correctness path.
+Runtime acquisition uses `OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL`, defaulting to
+`https://releases.open-design.ai/codex-plugin/<channel>/latest/runtime.json`.
 The plugin `.mcp.json` explicitly forwards these variables (plus optional
 `OD_DATA_DIR`) into its stdio server; arbitrary host environment is not
 implicitly inherited by plugin MCP processes.
 
 The MCP catalog is static from initialize: `get_open_design_status` remains
 read-only, while `ensure_open_design_runtime` lazily acquires or attaches the
-exact runtime. Acquisition uses the shared runtime store and lease below the
-suite namespace, writes a Codex-only handoff journal, starts the runtime
+exact runtime. Acquisition uses the Codex-owned runtime store and lease below
+`namespaces/<namespace>/codex-plugin/`, writes a handoff journal, starts the runtime
 detached, validates its one-time ready-file token digest and loopback identity,
-then advances the shared binding and active pointer.
+then advances the Codex-owned binding and active pointer. Runtime manifests use
+launcher-style `control.codexPlugin.version.min`; an older shell falls back to
+the last installed compatible runtime.
 
 ## Ownership and safety model
 
@@ -90,6 +96,7 @@ pnpm tools-pack codex-plugin build \
   --namespace codex-smoke-build \
   --runtime-version 0.16.1 \
   --protocol-version 1 \
+  --node-path /Applications/Codex.app/Contents/Resources/cua_node/bin/node \
   --json
 ```
 
@@ -119,7 +126,8 @@ pnpm tools-serve start codex-plugin \
   --json
 ```
 
-The JSON result contains `runtimeManifestUrl`; `/report` remains the
+The JSON result contains `environmentManifestUrl` and `runtimeManifestUrl`;
+both use release-compatible `codex-plugin/<channel>/...` paths. `/report` remains the
 shell-identity fixture consumed by the status path. Use one explicit absolute
 channel root for the shared suite:
 
@@ -127,6 +135,7 @@ channel root for the shared suite:
 pnpm tools-codex handoff \
   --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke-build/build-report.json \
   --distribution-channel-root <absolute-shared-channel-root> \
+  --environment-manifest-url <environmentManifestUrl> \
   --runtime-manifest-url <runtimeManifestUrl> \
   --fixture-report-url <endpoint-origin>/report \
   --json
@@ -134,7 +143,7 @@ pnpm tools-codex handoff \
 
 The first call must return a confirmed handoff. A repeated call must return
 `attached: true` for the same exact binding. If the runtime owner later exits,
-the next call may remove only that dead binding while holding the shared lease,
+the next call may remove only that dead binding while holding the Codex lease,
 reuse the immutable artifact, and advance the pointer generation. A live but
 unobservable or incompatible binding quick-fails instead of being replaced.
 
@@ -201,9 +210,10 @@ pnpm tools-codex start \
 ```
 
 When this run validates runtime handoff, append the same
-`--distribution-channel-root <absolute-shared-channel-root>` and
-`--runtime-manifest-url <runtimeManifestUrl>` pair used by the standalone
-probe. The controlled Desktop root and plugin MCP inherit the pair; no default
+`--distribution-channel-root <absolute-shared-channel-root>`,
+`--environment-manifest-url <environmentManifestUrl>`, and
+`--runtime-manifest-url <runtimeManifestUrl>` triple used by the standalone
+probe. The controlled Desktop root and plugin MCP inherit the triple; no default
 Codex config file is edited.
 
 The controlled Desktop root is recorded first. The command then observes the

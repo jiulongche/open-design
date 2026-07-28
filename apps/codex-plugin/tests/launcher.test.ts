@@ -9,6 +9,7 @@ import {
   CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   CODEX_PLUGIN_RUNTIME_ENV,
   CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
+  resolveCodexPluginSuitePaths,
 } from "@open-design/codex-plugin-proto";
 import {
   resolveDistributionRuntimeStorePaths,
@@ -29,15 +30,18 @@ describe("Codex plugin runtime launcher", () => {
   it("acquires one immutable runtime, confirms handoff, and reattaches", async () => {
     const root = await mkdtemp(join(tmpdir(), "od-codex-runtime-launcher-"));
     roots.push(root);
-    const suitePaths = resolveDistributionSuitePaths({
-      channel: "beta",
-      namespace: "release-beta",
-      namespaceBaseRoot: join(root, "namespaces"),
-    });
-    const runtimeSource = `
+    const suitePaths = resolveCodexPluginSuitePaths(
+      resolveDistributionSuitePaths({
+        channel: "beta",
+        namespace: "release-beta",
+        namespaceBaseRoot: join(root, "namespaces"),
+      }),
+    );
+    const runtimeSource = (tag: string) => `
 import { createHash } from "node:crypto";
 import { rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+const buildTag = ${JSON.stringify(tag)};
 const identity = {
   channel: process.env.${CODEX_PLUGIN_RUNTIME_ENV.CHANNEL},
   namespace: process.env.${CODEX_PLUGIN_RUNTIME_ENV.NAMESPACE},
@@ -67,27 +71,44 @@ server.listen(0, "127.0.0.1", () => {
     .then(() => rename(temporaryPath, readyPath));
 });
 `;
-    const runtimeBytes = Buffer.from(runtimeSource);
-    const runtimeDigest =
-      `sha256:${createHash("sha256").update(runtimeBytes).digest("hex")}`;
     const manifestUrl = "http://127.0.0.1:17456/manifest.json";
-    const artifactUrl = "http://127.0.0.1:17456/runtime.mjs";
-    const manifest = {
-      artifact: {
-        digest: runtimeDigest,
-        entryPath: "runtime.mjs",
-        mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
-        size: runtimeBytes.byteLength,
-        url: artifactUrl,
-      },
-      channel: "beta",
-      minShellVersion: "0.1.0",
-      namespace: "release-beta",
-      protocolVersion: 1,
-      runtimeDigest,
-      runtimeVersion: "1.2.3-beta.4",
-      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
-    } as const;
+    const artifacts = new Map<string, Buffer>();
+    const createManifest = (
+      runtimeVersion: string,
+      tag: string,
+      minShellVersion = "0.1.0",
+    ) => {
+      const bytes = Buffer.from(runtimeSource(tag));
+      const digest =
+        `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+      const artifactUrl =
+        `http://127.0.0.1:17456/${runtimeVersion}/runtime.mjs`;
+      artifacts.set(artifactUrl, bytes);
+      return {
+        artifact: {
+          digest,
+          entryPath: "runtime.mjs",
+          mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
+          size: bytes.byteLength,
+          url: artifactUrl,
+        },
+        channel: "beta",
+        control: {
+          codexPlugin: {
+            version: {
+              min: minShellVersion,
+            },
+          },
+        },
+        namespace: "release-beta",
+        protocolVersion: 1,
+        runtimeDigest: digest,
+        runtimeVersion,
+        schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+      } as const;
+    };
+    let manifest = createManifest("1.2.3-beta.4", "v1");
+    const runtimeDigest = manifest.runtimeDigest;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url === manifestUrl) {
@@ -95,8 +116,9 @@ server.listen(0, "127.0.0.1", () => {
           headers: { "content-type": "application/json" },
         });
       }
-      if (url === artifactUrl) {
-        return new Response(runtimeBytes, {
+      const artifact = artifacts.get(url);
+      if (artifact != null) {
+        return new Response(artifact, {
           headers: { "content-type": manifest.artifact.mediaType },
         });
       }
@@ -157,6 +179,35 @@ server.listen(0, "127.0.0.1", () => {
           shellType: "codex-plugin",
         },
         runtimeDigest,
+      });
+
+      await launcher.stopOwnedRuntime();
+      manifest = createManifest("1.2.4-beta.5", "v2");
+      const updated = await launcher.ensureRuntime();
+      expect(updated).toMatchObject({
+        attached: false,
+        manifest: {
+          runtimeDigest: manifest.runtimeDigest,
+          runtimeVersion: "1.2.4-beta.5",
+        },
+        reusedArtifact: false,
+      });
+      expect(JSON.parse(await readFile(storePaths.activePath, "utf8"))).toMatchObject({
+        generation: 9,
+        runtimeDigest: manifest.runtimeDigest,
+        runtimeVersion: "1.2.4-beta.5",
+      });
+
+      const compatibleManifest = manifest;
+      manifest = createManifest("1.2.5-beta.6", "v3", "0.2.0");
+      const fallback = await launcher.ensureRuntime();
+      expect(fallback).toMatchObject({
+        attached: true,
+        manifest: {
+          runtimeDigest: compatibleManifest.runtimeDigest,
+          runtimeVersion: compatibleManifest.runtimeVersion,
+        },
+        reusedArtifact: true,
       });
     } finally {
       await launcher.stopOwnedRuntime();

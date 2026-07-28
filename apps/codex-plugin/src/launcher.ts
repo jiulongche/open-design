@@ -113,6 +113,28 @@ function runtimeIdentityFromManifest(
   });
 }
 
+function assertRuntimeCoordinates(
+  identity: Pick<
+    DistributionRuntimeIdentityV1,
+    "channel" | "namespace" | "protocolVersion"
+  >,
+  runtime: Pick<
+    DistributionRuntimeIdentityV1,
+    "channel" | "namespace" | "protocolVersion"
+  >,
+): void {
+  if (
+    identity.channel !== runtime.channel
+    || identity.namespace !== runtime.namespace
+    || identity.protocolVersion !== runtime.protocolVersion
+  ) {
+    throw new CodexPluginLauncherError(
+      "RUNTIME_COORDINATE_MISMATCH",
+      "runtime manifest channel, namespace, or protocol does not match the Codex plugin distribution",
+    );
+  }
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -339,6 +361,34 @@ async function acquireRuntimeArtifact(options: {
   return { entryPath, reused: false };
 }
 
+async function readCompatibleFallbackManifest(options: {
+  shellVersion: string;
+  storePaths: ReturnType<typeof resolveDistributionRuntimeStorePaths>;
+}): Promise<CodexPluginAcquisitionManifestV1 | null> {
+  const pointerRaw = await readJsonIfExists(options.storePaths.activePath);
+  if (pointerRaw == null) return null;
+  const pointer = parseDistributionRuntimePointer(pointerRaw);
+  const versionPaths = resolveDistributionRuntimeVersionPaths({
+    runtimeDigest: pointer.runtimeDigest,
+    runtimeVersion: pointer.runtimeVersion,
+    storePaths: options.storePaths,
+  });
+  const manifestRaw = await readJsonIfExists(versionPaths.manifestPath);
+  if (manifestRaw == null) return null;
+  const manifest = parseCodexPluginAcquisitionManifest(manifestRaw);
+  const identity = runtimeIdentityFromManifest(manifest);
+  assertSameDistributionRuntimeIdentity(pointer, identity);
+  if (
+    compareCodexPluginShellVersions(
+      options.shellVersion,
+      manifest.control.codexPlugin.version.min,
+    ) < 0
+  ) {
+    return null;
+  }
+  return manifest;
+}
+
 async function waitForRuntimeReady(
   path: string,
   child: ChildProcess,
@@ -425,24 +475,34 @@ export class CodexPluginRuntimeLauncher {
   }
 
   async ensureRuntime(): Promise<CodexPluginRuntimeEnsureResult> {
-    const manifest = parseCodexPluginAcquisitionManifest(
+    const requestedManifest = parseCodexPluginAcquisitionManifest(
       await fetchJson(this.manifestUrl, this.fetchImpl, 5_000),
     );
-    const expected = runtimeIdentityFromManifest(manifest);
-    assertSameDistributionRuntimeIdentity(this.identity, expected);
-    if (compareCodexPluginShellVersions(
-      this.shellVersion,
-      manifest.minShellVersion,
-    ) < 0) {
-      throw new CodexPluginLauncherError(
-        "SHELL_VERSION_TOO_OLD",
-        `Codex plugin ${this.shellVersion} is below required ${manifest.minShellVersion}`,
-      );
-    }
-
+    const requestedIdentity = runtimeIdentityFromManifest(requestedManifest);
+    assertRuntimeCoordinates(this.identity, requestedIdentity);
     const storePaths = resolveDistributionRuntimeStorePaths(this.suitePaths);
     const shellPaths = resolveCodexPluginShellPaths(this.suitePaths);
-    await writeJsonAtomic(shellPaths.acquisitionPath, manifest);
+    await writeJsonAtomic(shellPaths.acquisitionPath, requestedManifest);
+
+    let manifest = requestedManifest;
+    if (compareCodexPluginShellVersions(
+      this.shellVersion,
+      requestedManifest.control.codexPlugin.version.min,
+    ) < 0) {
+      const fallback = await readCompatibleFallbackManifest({
+        shellVersion: this.shellVersion,
+        storePaths,
+      });
+      if (fallback == null) {
+        throw new CodexPluginLauncherError(
+          "SHELL_VERSION_TOO_OLD",
+          `Codex plugin ${this.shellVersion} is below required ${requestedManifest.control.codexPlugin.version.min} and no compatible runtime fallback is installed`,
+        );
+      }
+      manifest = fallback;
+    }
+    const expected = runtimeIdentityFromManifest(manifest);
+    assertRuntimeCoordinates(this.identity, expected);
 
     if (
       this.session != null

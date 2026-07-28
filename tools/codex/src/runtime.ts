@@ -6,6 +6,7 @@ import { ToolCodexError } from "./state.js";
 
 export type ToolCodexRuntimeBinding = {
   distributionChannelRoot: string;
+  environmentManifestUrl: string;
   runtimeManifestUrl: string;
 };
 
@@ -36,19 +37,25 @@ function normalizeRuntimeManifestUrl(value: string): string {
 
 export function resolveToolCodexRuntimeBinding(options: {
   distributionChannelRoot?: string;
+  environmentManifestUrl?: string;
   runtimeManifestUrl?: string;
 }): ToolCodexRuntimeBinding | null {
   const hasChannelRoot = options.distributionChannelRoot != null
     && options.distributionChannelRoot.length > 0;
   const hasManifestUrl = options.runtimeManifestUrl != null
     && options.runtimeManifestUrl.length > 0;
-  if (hasChannelRoot !== hasManifestUrl) {
+  const hasEnvironmentManifestUrl = options.environmentManifestUrl != null
+    && options.environmentManifestUrl.length > 0;
+  if (
+    hasChannelRoot !== hasManifestUrl
+    || hasChannelRoot !== hasEnvironmentManifestUrl
+  ) {
     throw new ToolCodexError(
       "RUNTIME_BINDING_INCOMPLETE",
-      "--distribution-channel-root and --runtime-manifest-url must be provided together",
+      "--distribution-channel-root, --environment-manifest-url, and --runtime-manifest-url must be provided together",
     );
   }
-  if (!hasChannelRoot || !hasManifestUrl) return null;
+  if (!hasChannelRoot || !hasManifestUrl || !hasEnvironmentManifestUrl) return null;
   const channelRoot = options.distributionChannelRoot!;
   if (!isAbsolute(channelRoot)) {
     throw new ToolCodexError(
@@ -58,6 +65,9 @@ export function resolveToolCodexRuntimeBinding(options: {
   }
   return {
     distributionChannelRoot: resolve(channelRoot),
+    environmentManifestUrl: normalizeRuntimeManifestUrl(
+      options.environmentManifestUrl!,
+    ),
     runtimeManifestUrl: normalizeRuntimeManifestUrl(options.runtimeManifestUrl!),
   };
 }
@@ -69,6 +79,8 @@ export function toolCodexRuntimeEnv(
   return {
     [CODEX_PLUGIN_ENV.DISTRIBUTION_CHANNEL_ROOT]:
       binding.distributionChannelRoot,
+    [CODEX_PLUGIN_ENV.ENVIRONMENT_MANIFEST_URL]:
+      binding.environmentManifestUrl,
     [CODEX_PLUGIN_ENV.RUNTIME_MANIFEST_URL]: binding.runtimeManifestUrl,
   };
 }

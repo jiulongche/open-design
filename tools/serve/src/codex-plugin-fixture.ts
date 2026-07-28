@@ -1,14 +1,20 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import {
+  CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES,
+  CODEX_PLUGIN_PLATFORM_TARGETS,
   CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
   parseCodexPluginAcquisitionManifest,
+  parseCodexPluginEnvironmentArtifactBuild,
+  parseCodexPluginEnvironmentManifest,
   parseCodexPluginFixtureReport,
   type CodexPluginAcquisitionManifestV1,
+  type CodexPluginEnvironmentArtifactBuildV1,
+  type CodexPluginEnvironmentManifestV1,
   type CodexPluginFixtureReportV1,
 } from "@open-design/codex-plugin-proto";
 import {
@@ -28,6 +34,8 @@ export type CodexPluginFixtureOptions = {
 export type CodexPluginFixtureServer = {
   buildReport: DistributionBuildReportV1;
   close(): Promise<void>;
+  environmentArtifact: CodexPluginEnvironmentArtifactBuildV1;
+  environmentManifest: CodexPluginEnvironmentManifestV1;
   info: CodexPluginFixtureReportV1;
   manifest: CodexPluginAcquisitionManifestV1;
 };
@@ -81,6 +89,23 @@ export async function startCodexPluginFixtureServer(
   if (buildReport.runtimeArtifact == null) {
     throw new Error("Codex plugin build report does not contain a runtime artifact");
   }
+  const environmentArtifact = parseCodexPluginEnvironmentArtifactBuild(
+    JSON.parse(await readFile(join(
+      dirname(buildReportPath),
+      "environment",
+      CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
+      "artifact.json",
+    ), "utf8")) as unknown,
+  );
+  const environmentBytes = await readFile(environmentArtifact.path);
+  const environmentDigest =
+    `sha256:${createHash("sha256").update(environmentBytes).digest("hex")}`;
+  if (
+    environmentBytes.byteLength !== environmentArtifact.size
+    || environmentDigest !== environmentArtifact.digest
+  ) {
+    throw new Error("Codex plugin environment artifact does not match its report");
+  }
   const runtimeBytes = await readFile(buildReport.runtimeArtifact.path);
   const runtimeDigest =
     `sha256:${createHash("sha256").update(runtimeBytes).digest("hex")}`;
@@ -91,6 +116,7 @@ export async function startCodexPluginFixtureServer(
     throw new Error("Codex plugin runtime artifact does not match the build report");
   }
   let info: CodexPluginFixtureReportV1 | null = null;
+  let environmentManifest: CodexPluginEnvironmentManifestV1 | null = null;
   let manifest: CodexPluginAcquisitionManifestV1 | null = null;
   const server = createServer((request, response) => {
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -126,11 +152,42 @@ export async function startCodexPluginFixtureServer(
       }));
       return;
     }
-    if (request.url === "/runtime/manifest.json" && manifest != null) {
+    if (
+      (
+        request.url === "/runtime/manifest.json"
+        || request.url
+          === `/codex-plugin/${buildReport.identity.channel}/latest/runtime.json`
+      )
+      && manifest != null
+    ) {
       sendJson(response, manifest);
       return;
     }
-    if (request.url === "/runtime/runtime.mjs") {
+    if (
+      request.url === `/codex-plugin/${buildReport.identity.channel}/latest/platforms/darwin-arm64.json`
+      && environmentManifest != null
+    ) {
+      sendJson(response, environmentManifest);
+      return;
+    }
+    if (
+      request.url
+        === `/codex-plugin/${buildReport.identity.channel}/versions/${environmentArtifact.version}/platforms/darwin-arm64/node`
+    ) {
+      response.statusCode = 200;
+      response.setHeader(
+        "content-type",
+        CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES.NODE_EXECUTABLE_V1,
+      );
+      response.setHeader("content-length", String(environmentBytes.byteLength));
+      response.end(request.method === "HEAD" ? undefined : environmentBytes);
+      return;
+    }
+    if (
+      request.url === "/runtime/runtime.mjs"
+      || request.url
+        === `/codex-plugin/${buildReport.identity.channel}/versions/${buildReport.identity.runtimeVersion}/runtime/runtime.mjs`
+    ) {
       response.statusCode = 200;
       response.setHeader(
         "content-type",
@@ -145,16 +202,35 @@ export async function startCodexPluginFixtureServer(
   });
   await listen(server, options.port ?? 0, host);
   const origin = serverOrigin(server);
+  environmentManifest = parseCodexPluginEnvironmentManifest({
+    node: {
+      digest: environmentArtifact.digest,
+      mediaType: CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES.NODE_EXECUTABLE_V1,
+      size: environmentArtifact.size,
+      url:
+        `${origin}/codex-plugin/${buildReport.identity.channel}/versions/${environmentArtifact.version}/platforms/darwin-arm64/node`,
+      version: environmentArtifact.version,
+    },
+    platform: environmentArtifact.platform,
+    schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+  });
   manifest = parseCodexPluginAcquisitionManifest({
     artifact: {
       digest: buildReport.runtimeArtifact.digest,
       entryPath: buildReport.runtimeArtifact.entryPath,
       mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
       size: buildReport.runtimeArtifact.size,
-      url: `${origin}/runtime/runtime.mjs`,
+      url:
+        `${origin}/codex-plugin/${buildReport.identity.channel}/versions/${buildReport.identity.runtimeVersion}/runtime/runtime.mjs`,
     },
     channel: buildReport.identity.channel,
-    minShellVersion: buildReport.identity.shellVersion,
+    control: {
+      codexPlugin: {
+        version: {
+          min: buildReport.identity.shellVersion,
+        },
+      },
+    },
     namespace: buildReport.identity.namespace,
     protocolVersion: buildReport.identity.protocolVersion,
     runtimeDigest: buildReport.identity.runtimeDigest,
@@ -163,14 +239,19 @@ export async function startCodexPluginFixtureServer(
   });
   info = parseCodexPluginFixtureReport({
     endpointUrl: `${origin}/runtime`,
+    environmentManifestUrl:
+      `${origin}/codex-plugin/${buildReport.identity.channel}/latest/platforms/darwin-arm64.json`,
     healthUrl: `${origin}/health`,
     identity: buildReport.identity,
-    runtimeManifestUrl: `${origin}/runtime/manifest.json`,
+    runtimeManifestUrl:
+      `${origin}/codex-plugin/${buildReport.identity.channel}/latest/runtime.json`,
     schemaVersion: DISTRIBUTION_REPORT_SCHEMA_VERSION,
   });
   return {
     buildReport,
     close: () => close(server),
+    environmentArtifact,
+    environmentManifest,
     info,
     manifest,
   };

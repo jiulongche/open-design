@@ -93,16 +93,40 @@ describe("codex plugin identity", () => {
     })).toEqual({
       configured: true,
       paths: {
-        cacheRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "cache"),
+        cacheRoot: join(
+          channelRoot,
+          "namespaces",
+          IDENTITY.namespace,
+          "codex-plugin",
+          "cache",
+        ),
         channel: IDENTITY.channel,
         channelRoot,
         dataRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "data"),
-        logsRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "logs"),
+        logsRoot: join(
+          channelRoot,
+          "namespaces",
+          IDENTITY.namespace,
+          "codex-plugin",
+          "logs",
+        ),
         namespace: IDENTITY.namespace,
         namespaceBaseRoot: join(channelRoot, "namespaces"),
         namespaceRoot: join(channelRoot, "namespaces", IDENTITY.namespace),
-        runtimeRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "runtime"),
-        updatesRoot: join(channelRoot, "namespaces", IDENTITY.namespace, "updates"),
+        runtimeRoot: join(
+          channelRoot,
+          "namespaces",
+          IDENTITY.namespace,
+          "codex-plugin",
+          "runtime",
+        ),
+        updatesRoot: join(
+          channelRoot,
+          "namespaces",
+          IDENTITY.namespace,
+          "codex-plugin",
+          "updates",
+        ),
       },
     });
   });

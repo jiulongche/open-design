@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -28,7 +35,10 @@ async function createWorkspace(): Promise<string> {
   await writeFile(join(pluginRoot, ".mcp.json"), JSON.stringify({
     mcpServers: {
       "open-design": {
+        args: ["./bootstrap.sh", "--identity-file", "./distribution.json"],
+        command: "/bin/sh",
         env_vars: [
+          "OD_CODEX_PLUGIN_ENVIRONMENT_MANIFEST_URL",
           "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
           "OD_DATA_DIR",
           "OD_DISTRIBUTION_CHANNEL_ROOT",
@@ -36,9 +46,31 @@ async function createWorkspace(): Promise<string> {
       },
     },
   }));
+  await writeFile(
+    join(pluginRoot, "bootstrap.sh"),
+    "#!/bin/sh\nexec /bin/false\n",
+  );
   await writeFile(join(pluginRoot, "skills", "status", "SKILL.md"), "# Status\n");
   await writeFile(join(appRoot, "dist", "mcp", "server.mjs"), "export {};\n");
   return root;
+}
+
+async function createFakeArm64Node(workspaceRoot: string): Promise<string> {
+  const path = join(workspaceRoot, "fixtures", "node");
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, [
+    "#!/bin/sh",
+    "if [ \"$1\" = \"--version\" ]; then",
+    "  echo v24.14.0",
+    "elif [ \"$1\" = \"-p\" ]; then",
+    "  echo arm64",
+    "else",
+    "  exit 1",
+    "fi",
+    "",
+  ].join("\n"));
+  await chmod(path, 0o700);
+  return path;
 }
 
 describe("tools-pack codex-plugin", () => {
@@ -53,10 +85,12 @@ describe("tools-pack codex-plugin", () => {
 
   it("builds a relocatable local marketplace and exact report", async () => {
     const workspaceRoot = await createWorkspace();
+    const nodePath = await createFakeArm64Node(workspaceRoot);
     const report = await packCodexPlugin({
       channel: "beta",
       dir: join(workspaceRoot, "tool-root"),
       namespace: "smoke",
+      nodePath,
       protocolVersion: 2,
       runtimeVersion: "2.0.0-beta.1",
       shellVersion: "0.2.0",
@@ -75,6 +109,7 @@ describe("tools-pack codex-plugin", () => {
     });
     expect(report.artifact.files).toEqual([...report.artifact.files].sort());
     expect(report.artifact.files).toContain("mcp/server.mjs");
+    expect(report.artifact.files).toContain("bootstrap.sh");
     expect(report.artifact.files).not.toContain("distribution.json");
     expect((await stat(join(report.paths.shellRoot, "distribution.json"))).isFile()).toBe(true);
     expect(report.runtimeArtifact).toMatchObject({
@@ -82,6 +117,24 @@ describe("tools-pack codex-plugin", () => {
       entryPath: "runtime.mjs",
     });
     expect((await stat(report.runtimeArtifact!.path)).mode & 0o100).toBe(0o100);
+    const environmentArtifact = JSON.parse(await readFile(
+      join(
+        dirname(report.paths.artifactRoot),
+        "environment",
+        "darwin-arm64",
+        "artifact.json",
+      ),
+      "utf8",
+    )) as {
+      path?: string;
+      platform?: string;
+      version?: string;
+    };
+    expect(environmentArtifact).toMatchObject({
+      platform: "darwin-arm64",
+      version: "24.14.0",
+    });
+    expect((await stat(environmentArtifact.path!)).mode & 0o100).toBe(0o100);
 
     const manifest = JSON.parse(await readFile(report.paths.manifestPath, "utf8")) as {
       version?: string;
@@ -96,6 +149,7 @@ describe("tools-pack codex-plugin", () => {
       };
     };
     expect(mcpConfig.mcpServers?.["open-design"]?.env_vars).toEqual([
+      "OD_CODEX_PLUGIN_ENVIRONMENT_MANIFEST_URL",
       "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",
       "OD_DATA_DIR",
       "OD_DISTRIBUTION_CHANNEL_ROOT",
@@ -138,10 +192,12 @@ describe("tools-pack codex-plugin", () => {
 
   it("produces a stable digest for the same shell inputs", async () => {
     const workspaceRoot = await createWorkspace();
+    const nodePath = await createFakeArm64Node(workspaceRoot);
     const options = {
       channel: "stable",
       dir: join(workspaceRoot, "tool-root"),
       namespace: "deterministic",
+      nodePath,
       runtimeVersion: "2.0.0",
       skipAppBuild: true,
       workspaceRoot,

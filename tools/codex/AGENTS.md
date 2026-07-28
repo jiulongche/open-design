@@ -13,7 +13,7 @@ under `~/.od/tools-codex/<environment-namespace>`. It prepares a packed
 Desktop process tree, captures Desktop host-load evidence, invokes the plugin
 through same-home `codex exec`, combines evidence, and performs exact layered
 cleanup. It also exposes a host-independent `handoff` probe for the static MCP
-tool → shared runtime acquisition/attach path.
+tool → Codex-owned runtime acquisition/attach path.
 
 The current Desktop UI lane is intentionally operator-assisted:
 
@@ -54,8 +54,8 @@ Control-plane implementation:
 - `src/invocation.ts` — ephemeral same-home `codex exec --json` invocation,
   target-tool validation, on-request automatic approval review, retries, and
   invocation-owned cleanup.
-- `src/runtime.ts` — explicit shared channel-root/runtime-manifest binding and
-  stable environment propagation into Codex CLI/Desktop.
+- `src/runtime.ts` — explicit shared channel-root plus Codex environment/runtime
+  manifest binding and stable propagation into Codex CLI/Desktop.
 - `src/clean.ts` — exact `control`, `runs`, `plugin`, `cache`, `credentials`,
   and `home` cleanup layers.
 
@@ -78,8 +78,12 @@ Adjacent owners:
 - `apps/codex-plugin/src/identity.ts` — embedded distribution identity.
 - `apps/codex-plugin/src/suite.ts` — explicit channel-root binding onto the
   shared suite path resolver.
-- `apps/codex-plugin/src/launcher.ts` — shared lease, immutable acquisition,
-  detached ready-file handoff, binding confirmation, and exact attach.
+- `apps/codex-plugin/plugin/open-design/bootstrap.sh` — macOS arm64
+  Node-independent environment resolver; validates the Codex-bundled Node or
+  atomically acquires the managed fallback before MCP handoff.
+- `apps/codex-plugin/src/launcher.ts` — Codex-owned lease, immutable
+  acquisition, min-version fallback, detached ready-file handoff, binding
+  confirmation, and exact attach.
 - `apps/codex-plugin/plugin/open-design/` — Codex manifest, skill, and assets.
 - `packages/codex-plugin-proto/src/index.ts` — Codex-only bootstrap,
   acquisition, handoff, ready-message, and fixture protocol.
@@ -129,11 +133,12 @@ pnpm tools-pack codex-plugin build \
   --namespace codex-smoke \
   --runtime-version 0.16.1 \
   --protocol-version 1 \
+  --node-path /Applications/Codex.app/Contents/Resources/cua_node/bin/node \
   --json
 ```
 
 Start the loopback fixture in a dedicated terminal and retain its printed
-`runtimeManifestUrl`:
+`environmentManifestUrl` and `runtimeManifestUrl`:
 
 ```bash
 pnpm tools-serve start codex-plugin \
@@ -142,21 +147,23 @@ pnpm tools-serve start codex-plugin \
 ```
 
 Probe the packed MCP bootstrap against one explicit absolute shared channel
-root. Repeating the command must attach to the confirmed binding rather than
-download or start a second compatible runtime:
+root. Repeating the command must reuse the ready environment and attach to the
+confirmed Codex-owned binding:
 
 ```bash
 pnpm tools-codex handoff \
   --build-report .tmp/tools-pack/out/codex-plugin/namespaces/codex-smoke/build-report.json \
   --distribution-channel-root <absolute-shared-channel-root> \
+  --environment-manifest-url <environmentManifestUrl> \
   --runtime-manifest-url <runtimeManifestUrl> \
   --fixture-report-url <endpoint-origin>/report \
   --json
 ```
 
 The runtime fixture is detached from the short-lived MCP process and has a
-15-minute idle exit. A dead binding is recovered only while holding the shared
-runtime lease; a live but unobservable or incompatible binding fails closed.
+15-minute idle exit. A dead binding is recovered only while holding the
+Codex-owned runtime lease; a live but unobservable or incompatible binding
+fails closed.
 
 ## Hot path: local distribution and automated evidence
 
@@ -197,11 +204,12 @@ pnpm tools-codex start \
 ```
 
 For the runtime-handoff lane, append the same
-`--distribution-channel-root <absolute-shared-channel-root>` and
-`--runtime-manifest-url <runtimeManifestUrl>` pair to `start`, `invoke`, and
-`accept`. The pair is all-or-nothing and is propagated through the controlled
-Desktop/CLI environment; it is not persisted into the user's default Codex
-configuration.
+`--distribution-channel-root <absolute-shared-channel-root>`,
+`--environment-manifest-url <environmentManifestUrl>`, and
+`--runtime-manifest-url <runtimeManifestUrl>` triple to `start`, `invoke`, and
+`accept`. The triple is all-or-nothing and is propagated through the
+controlled Desktop/CLI environment; it is not persisted into the user's
+default Codex configuration.
 
 While the same controlled run is active, capture the structured invocation:
 

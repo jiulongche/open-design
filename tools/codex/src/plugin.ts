@@ -10,7 +10,10 @@ import { join, relative, resolve, sep } from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { CODEX_PLUGIN_ARGS } from "@open-design/codex-plugin-proto";
+import {
+  CODEX_PLUGIN_ARGS,
+  parseCodexPluginAcquisitionManifest,
+} from "@open-design/codex-plugin-proto";
 import {
   assertSameDistributionIdentity,
   assertSameDistributionRuntimeIdentity,
@@ -44,7 +47,10 @@ import {
   parseToolCodexAutomatedInvocationReport,
   type ToolCodexAutomatedInvocationReportV1,
 } from "./invocation.js";
-import type { ToolCodexRuntimeBinding } from "./runtime.js";
+import {
+  toolCodexRuntimeEnv,
+  type ToolCodexRuntimeBinding,
+} from "./runtime.js";
 
 export const CODEX_DESKTOP_ACCEPTANCE_STATUSES = [
   "PASS",
@@ -532,7 +538,7 @@ async function probeStdio(
   runtimeBinding?: ToolCodexRuntimeBinding | null,
 ): Promise<unknown> {
   const args = [
-    "./mcp/server.mjs",
+    "./bootstrap.sh",
     "--identity-file",
     "./distribution.json",
   ];
@@ -549,8 +555,14 @@ async function probeStdio(
   }
   const transport = new StdioClientTransport({
     args,
-    command: process.execPath,
+    command: "/bin/sh",
     cwd: buildReport.paths.shellRoot,
+    env: Object.fromEntries(
+      Object.entries({
+        ...process.env,
+        ...toolCodexRuntimeEnv(runtimeBinding),
+      }).filter((entry): entry is [string, string] => entry[1] != null),
+    ),
     stderr: "pipe",
   });
   const client = new Client({
@@ -587,11 +599,15 @@ async function probeStdio(
       runtime.structuredContent == null
       || typeof runtime.structuredContent !== "object"
       || !("binding" in runtime.structuredContent)
+      || !("manifest" in runtime.structuredContent)
     ) {
       throw new Error("Codex plugin runtime handoff did not return a binding");
     }
+    const selectedManifest = parseCodexPluginAcquisitionManifest(
+      (runtime.structuredContent as { manifest: unknown }).manifest,
+    );
     assertSameDistributionRuntimeIdentity(
-      buildReport.identity,
+      selectedManifest,
       parseDistributionRuntimeBinding(
         (runtime.structuredContent as { binding: unknown }).binding,
       ),

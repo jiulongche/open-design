@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmod,
   cp,
   mkdir,
   readFile,
@@ -12,7 +13,10 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
+  CODEX_PLUGIN_PLATFORM_TARGETS,
   CODEX_PLUGIN_RUNTIME_ENV,
+  parseCodexPluginEnvironmentArtifactBuild,
+  type CodexPluginEnvironmentArtifactBuildV1,
 } from "@open-design/codex-plugin-proto";
 import {
   DISTRIBUTION_REPORT_SCHEMA_VERSION,
@@ -35,6 +39,7 @@ export type CodexPluginBuildOptions = {
   channel?: string;
   dir?: string;
   namespace?: string;
+  nodePath?: string;
   protocolVersion?: string | number;
   runtimeDigest?: string;
   runtimeVersion?: string;
@@ -46,6 +51,8 @@ export type CodexPluginBuildOptions = {
 const DEFAULT_NAMESPACE = "codex-local";
 const DEFAULT_PROTOCOL_VERSION = 1;
 const RUNTIME_ENTRY_PATH = "runtime.mjs";
+const DARWIN_ARM64_NODE_PATH =
+  "/Applications/Codex.app/Contents/Resources/cua_node/bin/node";
 
 function parsePositiveInteger(value: string | number | undefined, label: string): number {
   if (value == null || value === "") return DEFAULT_PROTOCOL_VERSION;
@@ -86,6 +93,101 @@ async function runAppBuild(workspaceRoot: string): Promise<void> {
       });
     });
   }
+}
+
+async function runCapture(
+  command: string,
+  args: readonly string[],
+): Promise<string> {
+  return await new Promise<string>((resolveRun, rejectRun) => {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn(command, [...args], {
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", rejectRun);
+    child.once("close", (code, signal) => {
+      if (code === 0 && signal == null) {
+        resolveRun(stdout.trim());
+        return;
+      }
+      rejectRun(new Error(
+        `${command} ${args.join(" ")} failed: ${stderr.trim() || `exit ${code ?? signal ?? "unknown"}`}`,
+      ));
+    });
+  });
+}
+
+async function resolveDarwinArm64NodePath(
+  explicitPath: string | undefined,
+): Promise<string | null> {
+  const candidate = explicitPath == null
+    ? process.platform === "darwin" && process.arch === "arm64"
+      ? DARWIN_ARM64_NODE_PATH
+      : null
+    : resolve(explicitPath);
+  if (candidate == null) return null;
+  const info = await stat(candidate).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" && explicitPath == null) return null;
+    throw error;
+  });
+  if (info == null) return null;
+  if (!info.isFile() || info.size === 0) {
+    throw new Error(`Codex plugin Node artifact is not a regular file: ${candidate}`);
+  }
+  const [versionOutput, architecture] = await Promise.all([
+    runCapture(candidate, ["--version"]),
+    runCapture(candidate, ["-p", "process.arch"]),
+  ]);
+  if (!/^v24\.\d+\.\d+$/.test(versionOutput)) {
+    throw new Error(`Codex plugin Node artifact must be Node 24: ${versionOutput}`);
+  }
+  if (architecture !== "arm64") {
+    throw new Error(`Codex plugin Node artifact must be arm64: ${architecture}`);
+  }
+  return candidate;
+}
+
+async function packCodexPluginEnvironment(options: {
+  namespaceRoot: string;
+  nodePath: string | undefined;
+}): Promise<CodexPluginEnvironmentArtifactBuildV1> {
+  const sourcePath = await resolveDarwinArm64NodePath(options.nodePath);
+  if (sourcePath == null) {
+    throw new Error(
+      "Codex plugin build requires a macOS arm64 Node 24 artifact; run on Apple Silicon with Codex installed or pass --node-path",
+    );
+  }
+  const version = (await runCapture(sourcePath, ["--version"])).slice(1);
+  const targetPath = join(
+    options.namespaceRoot,
+    "environment",
+    CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
+    "node",
+  );
+  await mkdir(dirname(targetPath), { recursive: true });
+  await cp(sourcePath, targetPath);
+  await chmod(targetPath, 0o700);
+  const bytes = await readFile(targetPath);
+  const report = parseCodexPluginEnvironmentArtifactBuild({
+    digest: digestBytes(bytes),
+    path: targetPath,
+    platform: CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
+    size: bytes.byteLength,
+    version,
+  });
+  await writeJson(join(dirname(targetPath), "artifact.json"), report);
+  return report;
 }
 
 function assertWithinRoot(root: string, target: string, label: string): void {
@@ -268,6 +370,10 @@ export async function packCodexPlugin(
   await cp(sourceShellRoot, shellRoot, { recursive: true });
   await mkdir(join(shellRoot, "mcp"), { recursive: true });
   await cp(builtServerPath, join(shellRoot, "mcp", "server.mjs"));
+  await packCodexPluginEnvironment({
+    namespaceRoot,
+    nodePath: options.nodePath,
+  });
 
   const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
   manifest.version = shellVersion;

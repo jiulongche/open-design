@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   parseCodexPluginAcquisitionManifest,
@@ -18,6 +18,9 @@ import { startCodexPluginFixtureServer } from "../src/codex-plugin-fixture.js";
 const RUNTIME_BYTES = Buffer.from("export {};\n");
 const RUNTIME_DIGEST =
   `sha256:${createHash("sha256").update(RUNTIME_BYTES).digest("hex")}`;
+const NODE_BYTES = Buffer.from("#!/bin/sh\necho v24.14.0\n");
+const NODE_DIGEST =
+  `sha256:${createHash("sha256").update(NODE_BYTES).digest("hex")}`;
 const IDENTITY = {
   channel: "beta",
   namespace: "codex-smoke",
@@ -33,9 +36,22 @@ async function writeBuildReport(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "open-design-codex-plugin-serve-"));
   const shellRoot = join(root, "marketplace", "plugins", "open-design");
   const runtimePath = join(root, "runtime", "runtime.mjs");
+  const nodePath = join(root, "environment", "darwin-arm64", "node");
   await mkdir(join(shellRoot, ".codex-plugin"), { recursive: true });
   await mkdir(join(root, "runtime"), { recursive: true });
+  await mkdir(dirname(nodePath), { recursive: true });
   await writeFile(runtimePath, RUNTIME_BYTES);
+  await writeFile(nodePath, NODE_BYTES);
+  await writeFile(
+    join(dirname(nodePath), "artifact.json"),
+    JSON.stringify({
+      digest: NODE_DIGEST,
+      path: nodePath,
+      platform: "darwin-arm64",
+      size: NODE_BYTES.byteLength,
+      version: "24.14.0",
+    }),
+  );
   const path = join(root, "build-report.json");
   await writeFile(path, JSON.stringify({
     artifact: {
@@ -67,6 +83,18 @@ describe("Codex plugin fixture", () => {
     });
     try {
       expect(parseCodexPluginFixtureReport(server.info)).toEqual(server.info);
+      expect(server.info.environmentManifestUrl).toContain(
+        "/codex-plugin/beta/latest/platforms/darwin-arm64.json",
+      );
+      const environmentManifest = await (
+        await fetch(server.info.environmentManifestUrl)
+      ).json() as {
+        node?: { url?: string; version?: string };
+      };
+      expect(environmentManifest.node?.version).toBe("24.14.0");
+      expect(Buffer.from(
+        await (await fetch(environmentManifest.node!.url!)).arrayBuffer(),
+      )).toEqual(NODE_BYTES);
       const report = parseDistributionServeReport(
         await (await fetch(server.info.endpointUrl.replace("/runtime", "/report"))).json(),
       );

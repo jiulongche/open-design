@@ -29,7 +29,8 @@ async function run(): Promise<void> {
   const identity = await readDistributionIdentity(identityFile);
   const fixtureReportUrl = resolveFixtureReportUrl(args);
   const suite = observeCodexPluginSuite({ args, identity });
-  const runtimeManifestUrl = resolveCodexPluginRuntimeManifestUrl(args);
+  const runtimeManifestUrl = resolveCodexPluginRuntimeManifestUrl(args)
+    ?? `https://releases.open-design.ai/codex-plugin/${identity.channel}/latest/runtime.json`;
   const runtimeLauncher = suite.configured && runtimeManifestUrl != null
     ? new CodexPluginRuntimeLauncher({
         identity,

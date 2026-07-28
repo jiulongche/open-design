@@ -18,9 +18,11 @@ Read `tools/pack/CACHE.md` before changing any build-cache node key, adding a ca
 - Linux headless (no-Electron) install/start/stop via `--headless` flag on `install`, `start`, and `stop`.
 - Linux containerized builds via `electronuserland/builder` Docker image for distro-agnostic glibc compat.
 - Consuming sidecar/process/path primitives from `@open-design/sidecar-proto`, `@open-design/sidecar`, and `@open-design/platform`.
-- Consuming the shared channel/namespace suite resolver from
-  `@open-design/distribution-proto`; tools-pack output roots remain tool-owned,
-  but runtime namespace roots must not invent a second layout.
+- Consuming the shared channel/namespace/data resolver from
+  `@open-design/distribution-proto`; tools-pack output roots remain tool-owned.
+  Codex plugin lifecycle payloads use the explicit
+  `namespaces/<namespace>/codex-plugin/` boundary rather than packaged/desktop
+  runtime roots.
 - Codex plugin builds must rebuild `distribution-proto`,
   `codex-plugin-proto`, then `apps/codex-plugin` before copying the MCP bundle,
   so packed protocol code never depends on stale workspace `dist`.

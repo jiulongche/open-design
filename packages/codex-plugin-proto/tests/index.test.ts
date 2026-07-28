@@ -4,16 +4,21 @@ import { describe, expect, it } from "vitest";
 
 import {
   CODEX_PLUGIN_HANDOFF_STATES,
+  CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES,
+  CODEX_PLUGIN_PLATFORM_TARGETS,
   CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
   CodexPluginProtocolError,
   assertCodexPluginHandoffTransition,
   compareCodexPluginShellVersions,
   parseCodexPluginAcquisitionManifest,
+  parseCodexPluginEnvironmentArtifactBuild,
+  parseCodexPluginEnvironmentManifest,
   parseCodexPluginFixtureReport,
   parseCodexPluginHandoffDescriptor,
   parseCodexPluginRuntimeReady,
   resolveCodexPluginShellPaths,
+  resolveCodexPluginSuitePaths,
 } from "../src/index.js";
 import { resolveDistributionSuitePaths } from "@open-design/distribution-proto";
 
@@ -30,7 +35,13 @@ function manifest() {
       url: "http://127.0.0.1:17456/runtime.mjs",
     },
     channel: "beta",
-    minShellVersion: "0.1.0",
+    control: {
+      codexPlugin: {
+        version: {
+          min: "0.1.0",
+        },
+      },
+    },
     namespace: "release-beta",
     protocolVersion: 1,
     runtimeDigest: RUNTIME_DIGEST,
@@ -63,21 +74,27 @@ function handoff(state: string, overrides: Record<string, unknown> = {}) {
 }
 
 describe("@open-design/codex-plugin-proto", () => {
-  it("derives only Codex shell state below shared suite paths", () => {
+  it("shares only namespace data and isolates Codex plugin lifecycle roots", () => {
     const suite = resolveDistributionSuitePaths({
       channel: "beta",
       namespace: "release-beta",
       namespaceBaseRoot: resolve("/tmp/open-design-beta/namespaces"),
     });
     const paths = resolveCodexPluginShellPaths(suite);
+    const pluginSuite = resolveCodexPluginSuitePaths(suite);
 
     expect(paths.shellRoot).toBe(
-      join(suite.namespaceRoot, "shells", "codex-plugin"),
+      join(suite.namespaceRoot, "codex-plugin"),
     );
     expect(paths.handoffsRoot).toBe(
       join(paths.shellRoot, "state", "handoffs"),
     );
-    expect(paths.logsRoot).toBe(join(suite.logsRoot, "codex-plugin"));
+    expect(paths.logsRoot).toBe(join(paths.shellRoot, "logs"));
+    expect(pluginSuite.dataRoot).toBe(suite.dataRoot);
+    expect(pluginSuite.cacheRoot).toBe(join(paths.shellRoot, "cache"));
+    expect(pluginSuite.logsRoot).toBe(join(paths.shellRoot, "logs"));
+    expect(pluginSuite.runtimeRoot).toBe(join(paths.shellRoot, "runtime"));
+    expect(pluginSuite.updatesRoot).toBe(join(paths.shellRoot, "updates"));
     expect(paths.shellRoot.startsWith(suite.namespaceRoot)).toBe(true);
   });
 
@@ -100,6 +117,22 @@ describe("@open-design/codex-plugin-proto", () => {
     expect(compareCodexPluginShellVersions("0.1.0", "0.1.0")).toBe(0);
     expect(compareCodexPluginShellVersions("0.2.0", "0.1.0")).toBeGreaterThan(0);
     expect(compareCodexPluginShellVersions("0.2.0-beta.1", "0.2.0")).toBeLessThan(0);
+  });
+
+  it("normalizes the legacy flat shell floor into launcher-style control", () => {
+    const legacy = {
+      ...manifest(),
+      control: undefined,
+      minShellVersion: "0.1.0",
+    };
+    delete legacy.control;
+    expect(parseCodexPluginAcquisitionManifest(legacy).control).toEqual({
+      codexPlugin: {
+        version: {
+          min: "0.1.0",
+        },
+      },
+    });
   });
 
   it("validates handoff state-specific runtime bindings", () => {
@@ -154,6 +187,8 @@ describe("@open-design/codex-plugin-proto", () => {
   it("parses a loopback fixture report with a runtime manifest URL", () => {
     expect(parseCodexPluginFixtureReport({
       endpointUrl: "http://127.0.0.1:17456/runtime",
+      environmentManifestUrl:
+        "http://127.0.0.1:17456/codex-plugin/beta/latest/platforms/darwin-arm64.json",
       healthUrl: "http://127.0.0.1:17456/health",
       identity: {
         channel: "beta",
@@ -168,7 +203,31 @@ describe("@open-design/codex-plugin-proto", () => {
       runtimeManifestUrl: "http://127.0.0.1:17456/runtime/manifest.json",
       schemaVersion: 1,
     })).toMatchObject({
+      environmentManifestUrl:
+        "http://127.0.0.1:17456/codex-plugin/beta/latest/platforms/darwin-arm64.json",
       runtimeManifestUrl: "http://127.0.0.1:17456/runtime/manifest.json",
     });
+  });
+
+  it("parses the independent macOS arm64 Node delivery contract", () => {
+    const artifact = parseCodexPluginEnvironmentArtifactBuild({
+      digest: RUNTIME_DIGEST,
+      path: "/tmp/codex-plugin/environment/darwin-arm64/node",
+      platform: CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64,
+      size: 1024,
+      version: "24.14.0",
+    });
+    expect(artifact.platform).toBe("darwin-arm64");
+    expect(parseCodexPluginEnvironmentManifest({
+      node: {
+        digest: artifact.digest,
+        mediaType: CODEX_PLUGIN_ENVIRONMENT_MEDIA_TYPES.NODE_EXECUTABLE_V1,
+        size: artifact.size,
+        url: "http://127.0.0.1:17456/codex-plugin/beta/versions/24.14.0/platforms/darwin-arm64/node",
+        version: artifact.version,
+      },
+      platform: artifact.platform,
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+    }).node.version).toBe("24.14.0");
   });
 });

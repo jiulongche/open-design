@@ -45,6 +45,7 @@ type PrepareOptions = CommonOptions & {
 type StartOptions = CommonOptions & {
   buildReport?: string;
   distributionChannelRoot?: string;
+  environmentManifestUrl?: string;
   hostLoadTimeoutMs?: string;
   runtimeManifestUrl?: string;
   workspace?: string;
@@ -59,6 +60,7 @@ type AcceptOptions = PrepareOptions & {
   desktopHostLoadReport?: string;
   desktopUiObservation?: string;
   distributionChannelRoot?: string;
+  environmentManifestUrl?: string;
   fixtureReportUrl?: string;
   out?: string;
   runtimeManifestUrl?: string;
@@ -71,6 +73,7 @@ type CaptureHostLoadOptions = PrepareOptions & {
 
 type InvokeOptions = PrepareOptions & {
   distributionChannelRoot?: string;
+  environmentManifestUrl?: string;
   maxAttempts?: string;
   out?: string;
   runtimeManifestUrl?: string;
@@ -80,6 +83,7 @@ type InvokeOptions = PrepareOptions & {
 type HandoffOptions = {
   buildReport?: string;
   distributionChannelRoot?: string;
+  environmentManifestUrl?: string;
   fixtureReportUrl?: string;
   json?: boolean;
   runtimeManifestUrl?: string;
@@ -159,6 +163,10 @@ function runtimeOptions(command: ReturnType<typeof cli.command>) {
     .option(
       "--distribution-channel-root <path>",
       "Absolute shared OD distribution channel root",
+    )
+    .option(
+      "--environment-manifest-url <url>",
+      "Codex plugin managed Node environment manifest URL",
     )
     .option(
       "--runtime-manifest-url <url>",

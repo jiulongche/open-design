@@ -9,6 +9,7 @@ import {
 import {
   CODEX_PLUGIN_ARGS,
   CODEX_PLUGIN_ENV,
+  resolveCodexPluginSuitePaths,
 } from "@open-design/codex-plugin-proto";
 
 export type CodexPluginSuiteObservation =
@@ -80,12 +81,14 @@ export function observeCodexPluginSuite(options: {
   if (channelRoot == null) return { configured: false };
   return {
     configured: true,
-    paths: resolveDistributionSuitePaths({
-      channel: options.identity.channel,
-      dataDir: env.OD_DATA_DIR,
-      namespace: options.identity.namespace,
-      namespaceBaseRoot: join(channelRoot, "namespaces"),
-      platform: options.platform ?? process.platform,
-    }),
+    paths: resolveCodexPluginSuitePaths(
+      resolveDistributionSuitePaths({
+        channel: options.identity.channel,
+        dataDir: env.OD_DATA_DIR,
+        namespace: options.identity.namespace,
+        namespaceBaseRoot: join(channelRoot, "namespaces"),
+        platform: options.platform ?? process.platform,
+      }),
+    ),
   };
 }
