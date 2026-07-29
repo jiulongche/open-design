@@ -71,7 +71,9 @@ describe("Codex plugin runtime launcher", () => {
         namespaceBaseRoot,
       }),
     );
-    const runtimeSource = (tag: string) => `
+    const runtimeSource = (tag: string) => tag === "crash"
+      ? "process.exit(1);\n"
+      : `
 import { createHash } from "node:crypto";
 import { rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -142,10 +144,14 @@ server.listen(0, "127.0.0.1", () => {
       } as const;
     };
     let manifest = createManifest("1.2.3-beta.4", "v1");
+    let manifestAvailable = true;
     const runtimeDigest = manifest.runtimeDigest;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url === manifestUrl) {
+        if (!manifestAvailable) {
+          return new Response("offline", { status: 503 });
+        }
         return new Response(JSON.stringify(manifest), {
           headers: { "content-type": "application/json" },
         });
@@ -224,24 +230,70 @@ server.listen(0, "127.0.0.1", () => {
       });
 
       await launcher.stopOwnedRuntime();
-      manifest = createManifest("1.2.4-beta.5", "v2");
+      manifestAvailable = false;
+      const offline = await launcher.ensureRuntime();
+      expect(offline).toMatchObject({
+        attached: false,
+        manifest: {
+          runtimeDigest,
+          runtimeVersion: "1.2.3-beta.4",
+        },
+        reusedArtifact: true,
+      });
+
+      await launcher.stopOwnedRuntime();
+      manifestAvailable = true;
+      const failedManifest = createManifest("1.2.4-beta.5", "crash");
+      manifest = failedManifest;
+      await expect(launcher.ensureRuntime()).rejects.toMatchObject({
+        code: "RUNTIME_EXITED_EARLY",
+      });
+      expect(JSON.parse(await readFile(storePaths.attemptPath, "utf8"))).toMatchObject({
+        runtimeDigest: failedManifest.runtimeDigest,
+        runtimeVersion: "1.2.4-beta.5",
+      });
+      expect(JSON.parse(await readFile(storePaths.activePath, "utf8"))).toMatchObject({
+        generation: 9,
+        runtimeDigest,
+        runtimeVersion: "1.2.3-beta.4",
+      });
+
+      const rollback = await launcher.ensureRuntime();
+      expect(rollback).toMatchObject({
+        attached: false,
+        manifest: {
+          runtimeDigest,
+          runtimeVersion: "1.2.3-beta.4",
+        },
+        reusedArtifact: true,
+      });
+      expect(JSON.parse(await readFile(storePaths.attemptPath, "utf8"))).toMatchObject({
+        runtimeDigest: failedManifest.runtimeDigest,
+        runtimeVersion: "1.2.4-beta.5",
+      });
+
+      await launcher.stopOwnedRuntime();
+      manifest = createManifest("1.2.5-beta.6", "v3");
       const updated = await launcher.ensureRuntime();
       expect(updated).toMatchObject({
         attached: false,
         manifest: {
           runtimeDigest: manifest.runtimeDigest,
-          runtimeVersion: "1.2.4-beta.5",
+          runtimeVersion: "1.2.5-beta.6",
         },
         reusedArtifact: false,
       });
       expect(JSON.parse(await readFile(storePaths.activePath, "utf8"))).toMatchObject({
-        generation: 9,
+        generation: 11,
         runtimeDigest: manifest.runtimeDigest,
-        runtimeVersion: "1.2.4-beta.5",
+        runtimeVersion: "1.2.5-beta.6",
+      });
+      await expect(readFile(storePaths.attemptPath, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
       });
 
       const compatibleManifest = manifest;
-      manifest = createManifest("1.2.5-beta.6", "v3", "0.2.0");
+      manifest = createManifest("1.2.6-beta.7", "v4", "0.2.0");
       const fallback = await launcher.ensureRuntime();
       expect(fallback).toMatchObject({
         attached: true,

@@ -131,13 +131,20 @@ pnpm tools-codex handoff \
 The first call downloads and verifies the external runtime, writes it under the
 immutable runtime store, starts it, validates the one-time ready token and
 loopback identity, then confirms the binding/pointer. A repeated call attaches
-to the compatible binding. A successful handoff records the exact runtime
-binding under the prepared plugin state. Replacing the prepared plugin clears
-that binding.
+to the compatible binding. Runtime launch is pre-armed in `attempt.json`; ready
+confirmation clears that attempt and advances `active.json`, whose pointer is
+therefore the local last-known-good runtime. A successful handoff records the
+exact runtime binding under the prepared plugin state. Replacing the prepared
+plugin clears that binding.
 
 A live incompatible or unobservable binding fails closed. A dead binding may
 be replaced only while holding the runtime lease. Concurrent acquisition must
 eventually use bounded observe-and-attach rather than stealing a live lease.
+Cold start is availability-first: when `latest/runtime.json` is unreachable,
+the shell selects the compatible installed active runtime and does not make the
+remote feed a startup dependency. An unconfirmed immutable attempt is not
+retried while a confirmed active runtime exists; a different later release may
+advance normally.
 
 ## Non-Desktop runtime lifecycle gate
 
@@ -173,18 +180,28 @@ The required lifecycle sequence is:
 5. Invoke the same installed plugin through real
    `codex --enable plugins exec --json`; require `attached:true` and
    `reusedArtifact:true` for N+1.
-6. Promote to a validly hashed runtime that exits before ready; require the
-   tool call to fail and the active pointer to remain on N+1 with no live
-   binding or temporary handoff state.
-7. Serve a newer manifest whose minimum shell version excludes the installed
+6. Make the manifest endpoint unavailable, stop N+1 precisely, and require a
+   cold start from the installed N+1 artifact without a remote metadata fetch
+   succeeding.
+7. Stop that exact offline-started N+1 runtime, then promote to a validly
+   hashed N+2 runtime that exits before ready. Require the tool call to fail,
+   `attempt.json` to identify N+2, and the active pointer to remain on N+1 with
+   no live binding or temporary ready state. Repeat the call against the same
+   latest manifest and require automatic startup of N+1 while preserving the
+   N+2 attempt evidence.
+8. Stop that exact rollback N+1 runtime, promote a valid N+3 release, and
+   require it to self-heal the runtime state: active advances to N+3 and
+   `attempt.json` is removed after ready confirmation.
+9. Serve a newer manifest whose minimum shell version excludes the installed
    shell; require selection and startup of the newest compatible installed
    runtime instead.
 
 The production runtime is detached after a confirmed handoff and can outlive an
 ephemeral `codex exec` host. Do not infer exit from CLI completion. Preserve
 Codex JSONL, fixture identity, `active.json`, binding evidence, exact controlled
-exit evidence, and immutable store inventory as the acceptance record. No UI
-screenshot is required for this non-Desktop gate.
+exit evidence, failed-attempt evidence when applicable, and immutable store
+inventory as the acceptance record. No UI screenshot is required for this
+non-Desktop gate.
 
 `get_open_design_status` reports the immutable identity embedded when the shell
 was built. After runtime promotion, `ensure_open_design_runtime` is the

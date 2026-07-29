@@ -23,6 +23,10 @@ import {
 } from "../src/codex-plugin.js";
 
 const roots: string[] = [];
+const platformIt = (
+  (process.platform === "win32" && process.arch === "x64")
+  || (process.platform === "darwin" && process.arch === "arm64")
+) ? it : it.skip;
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) =>
@@ -105,7 +109,7 @@ describe("tools-pack codex-plugin", () => {
     );
   });
 
-  it("builds a relocatable local marketplace and exact report", async () => {
+  platformIt("builds a relocatable local marketplace and exact report", async () => {
     const workspaceRoot = await createWorkspace();
     const target = currentTarget();
     const report = await packCodexPlugin({
@@ -221,7 +225,7 @@ describe("tools-pack codex-plugin", () => {
     })).rejects.toThrow();
   });
 
-  it("rejects cross-building a platform carrier on the wrong host", async () => {
+  platformIt("rejects cross-building a platform carrier on the wrong host", async () => {
     const workspaceRoot = await createWorkspace();
     const target = otherTarget(currentTarget());
     await expect(packCodexPlugin({
@@ -236,7 +240,7 @@ describe("tools-pack codex-plugin", () => {
     );
   });
 
-  it("produces a stable digest for the same shell inputs", async () => {
+  platformIt("produces a stable digest for the same shell inputs", async () => {
     const workspaceRoot = await createWorkspace();
     const target = currentTarget();
     const options = {
@@ -255,7 +259,7 @@ describe("tools-pack codex-plugin", () => {
     expect(second.identity).toEqual(first.identity);
   });
 
-  it("binds the external runtime fixture bytes to the runtime version", async () => {
+  platformIt("binds the external runtime fixture bytes to the runtime version", async () => {
     const workspaceRoot = await createWorkspace();
     const target = currentTarget();
     const options = {

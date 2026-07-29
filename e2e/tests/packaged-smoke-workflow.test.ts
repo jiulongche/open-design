@@ -991,8 +991,6 @@ process.stdin.on("end", () => {
     for (const file of [
       "apps/desktop/src/main.ts",
       "apps/packaged/src/index.ts",
-      "apps/codex-plugin/src/index.ts",
-      "tools/codex/src/index.ts",
       "tools/pack/src/win/installer.ts",
     ]) {
       await expect(runScopesPrint("workflow_dispatch", hot, [file])).resolves.toMatchObject({
@@ -1004,6 +1002,27 @@ process.stdin.on("end", () => {
         workspace_validation_required: true,
       });
     }
+
+    await expect(
+      runScopesPrint("workflow_dispatch", hot, ["apps/codex-plugin/src/index.ts"]),
+    ).resolves.toMatchObject({
+      run_playwright_critical: false,
+      run_ui_p0: false,
+      tools_dev_tests_required: false,
+      tools_pack_tests_required: true,
+      ui_critical_validation_required: false,
+      workspace_validation_required: true,
+    });
+    await expect(
+      runScopesPrint("workflow_dispatch", hot, ["tools/codex/src/index.ts"]),
+    ).resolves.toMatchObject({
+      run_playwright_critical: false,
+      run_ui_p0: false,
+      tools_dev_tests_required: false,
+      tools_pack_tests_required: false,
+      ui_critical_validation_required: false,
+      workspace_validation_required: true,
+    });
 
     const mergeGroup = {
       merge_group: {

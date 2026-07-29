@@ -31,12 +31,15 @@ import {
   assertSameDistributionRuntimeIdentity,
   isDistributionRuntimeLeaseExpired,
   normalizeDistributionRuntimeIdentity,
+  parseDistributionRuntimeAttempt,
   parseDistributionRuntimeBinding,
   parseDistributionRuntimeLease,
   parseDistributionRuntimePointer,
   resolveDistributionRuntimeStorePaths,
   resolveDistributionRuntimeVersionPaths,
+  selectDistributionRuntimeTarget,
   type DistributionIdentityV1,
+  type DistributionRuntimeAttemptV1,
   type DistributionRuntimeBindingV1,
   type DistributionRuntimeIdentityV1,
   type DistributionRuntimeLeaseV1,
@@ -506,10 +509,13 @@ async function acquireRuntimeArtifact(options: {
   return { entryPath, reused: false };
 }
 
-async function readCompatibleFallbackManifest(options: {
+async function readCompatibleActiveRuntime(options: {
   shellVersion: string;
   storePaths: ReturnType<typeof resolveDistributionRuntimeStorePaths>;
-}): Promise<CodexPluginAcquisitionManifestV1 | null> {
+}): Promise<{
+  manifest: CodexPluginAcquisitionManifestV1;
+  pointer: DistributionRuntimePointerV1;
+} | null> {
   const pointerRaw = await readJsonIfExists(options.storePaths.activePath);
   if (pointerRaw == null) return null;
   const pointer = parseDistributionRuntimePointer(pointerRaw);
@@ -531,7 +537,7 @@ async function readCompatibleFallbackManifest(options: {
   ) {
     return null;
   }
-  return manifest;
+  return { manifest, pointer };
 }
 
 async function waitForRuntimeReady(
@@ -635,31 +641,81 @@ export class CodexPluginRuntimeLauncher {
   }
 
   async ensureRuntime(): Promise<CodexPluginRuntimeEnsureResult> {
-    const requestedManifest = parseCodexPluginAcquisitionManifest(
-      await fetchJson(this.manifestUrl, this.fetchImpl, 5_000),
-    );
-    const requestedIdentity = runtimeIdentityFromManifest(requestedManifest);
-    assertRuntimeCoordinates(this.identity, requestedIdentity);
     const storePaths = resolveDistributionRuntimeStorePaths(this.suitePaths);
     const shellPaths = resolveCodexPluginShellPaths(this.suitePaths);
-    await writeJsonAtomic(shellPaths.acquisitionPath, requestedManifest);
+    const activeRuntime = await readCompatibleActiveRuntime({
+      shellVersion: this.shellVersion,
+      storePaths,
+    });
+    if (activeRuntime != null) {
+      assertRuntimeCoordinates(this.identity, activeRuntime.pointer);
+    }
+    let requestedPayload: { value: unknown } | null = null;
+    let requestedManifest: CodexPluginAcquisitionManifestV1 | null = null;
+    let requestError: unknown = null;
+    try {
+      requestedPayload = {
+        value: await fetchJson(this.manifestUrl, this.fetchImpl, 5_000),
+      };
+    } catch (error) {
+      requestError = error;
+    }
+    if (requestedPayload != null) {
+      requestedManifest = parseCodexPluginAcquisitionManifest(
+        requestedPayload.value,
+      );
+    }
 
-    let manifest = requestedManifest;
-    if (compareCodexPluginShellVersions(
-      this.shellVersion,
-      requestedManifest.control.codexPlugin.version.min,
-    ) < 0) {
-      const fallback = await readCompatibleFallbackManifest({
-        shellVersion: this.shellVersion,
-        storePaths,
-      });
-      if (fallback == null) {
+    if (requestedManifest == null && activeRuntime == null) throw requestError;
+    if (requestedManifest != null) {
+      const requestedIdentity = runtimeIdentityFromManifest(requestedManifest);
+      assertRuntimeCoordinates(this.identity, requestedIdentity);
+      await writeJsonAtomic(shellPaths.acquisitionPath, requestedManifest);
+    }
+
+    let armAttempt = false;
+    let manifest: CodexPluginAcquisitionManifestV1;
+    if (
+      requestedManifest != null
+      && compareCodexPluginShellVersions(
+        this.shellVersion,
+        requestedManifest.control.codexPlugin.version.min,
+      ) < 0
+    ) {
+      if (activeRuntime == null) {
         throw new CodexPluginLauncherError(
           "SHELL_VERSION_TOO_OLD",
           `Codex plugin ${this.shellVersion} is below required ${requestedManifest.control.codexPlugin.version.min} and no compatible runtime fallback is installed`,
         );
       }
-      manifest = fallback;
+      manifest = activeRuntime.manifest;
+    } else {
+      const attemptRaw = await readJsonIfExists(storePaths.attemptPath);
+      const attempted = attemptRaw == null
+        ? null
+        : parseDistributionRuntimeAttempt(attemptRaw);
+      if (attempted != null) {
+        assertRuntimeCoordinates(this.identity, attempted);
+      }
+      const requestedIdentity = requestedManifest == null
+        ? null
+        : runtimeIdentityFromManifest(requestedManifest);
+      const selection = selectDistributionRuntimeTarget({
+        active: activeRuntime?.pointer ?? null,
+        attempted,
+        requested: requestedIdentity,
+      });
+      if (selection.selected === "active" && activeRuntime != null) {
+        manifest = activeRuntime.manifest;
+      } else if (selection.selected === "requested" && requestedManifest != null) {
+        manifest = requestedManifest;
+        armAttempt = true;
+      } else {
+        throw requestError ?? new CodexPluginLauncherError(
+          "RUNTIME_UNAVAILABLE",
+          "no compatible local or requested Codex plugin runtime is available",
+        );
+      }
     }
     const expected = runtimeIdentityFromManifest(manifest);
     assertRuntimeCoordinates(this.identity, expected);
@@ -769,6 +825,14 @@ export class CodexPluginRuntimeLauncher {
         manifest,
         storePaths,
       });
+      if (armAttempt) {
+        const attempt: DistributionRuntimeAttemptV1 = {
+          ...expected,
+          attemptedAt: new Date().toISOString(),
+          schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+        };
+        await writeJsonAtomic(storePaths.attemptPath, attempt);
+      }
       handoff = parseCodexPluginHandoffDescriptor({
         ...handoff,
         state: CODEX_PLUGIN_HANDOFF_STATES.ACQUIRED,
@@ -867,6 +931,7 @@ export class CodexPluginRuntimeLauncher {
       };
       await writeJsonAtomic(storePaths.bindingPath, binding);
       await writeJsonAtomic(storePaths.activePath, pointer);
+      if (armAttempt) await rm(storePaths.attemptPath, { force: true });
       handoff = parseCodexPluginHandoffDescriptor({
         ...handoff,
         state: CODEX_PLUGIN_HANDOFF_STATES.CONFIRMED,

@@ -75,6 +75,7 @@ export type DistributionSuitePaths = {
 
 export type DistributionRuntimeStorePaths = {
   activePath: string;
+  attemptPath: string;
   bindingPath: string;
   downloadsRoot: string;
   leasePath: string;
@@ -109,6 +110,25 @@ export type DistributionRuntimePointerV1 = {
   schemaVersion: typeof DISTRIBUTION_RUNTIME_SCHEMA_VERSION;
   updatedAt: string;
 };
+
+export type DistributionRuntimeAttemptV1 = DistributionRuntimeIdentityV1 & {
+  attemptedAt: string;
+  schemaVersion: typeof DISTRIBUTION_RUNTIME_SCHEMA_VERSION;
+};
+
+export type DistributionRuntimeTargetSelection =
+  | {
+      reason: "active-offline" | "active-after-failed-attempt";
+      selected: "active";
+    }
+  | {
+      reason: "no-runtime-target";
+      selected: null;
+    }
+  | {
+      reason: "requested" | "requested-without-fallback";
+      selected: "requested";
+    };
 
 export type DistributionRuntimeLeaseV1 = {
   acquiredAt: string;
@@ -387,6 +407,7 @@ export function resolveDistributionRuntimeStorePaths(
   const runtimeUpdatesRoot = join(suitePaths.updatesRoot, "runtime");
   return {
     activePath: join(stateRoot, "active.json"),
+    attemptPath: join(stateRoot, "attempt.json"),
     bindingPath: join(stateRoot, "binding.json"),
     downloadsRoot: join(runtimeUpdatesRoot, "downloads"),
     leasePath: join(stateRoot, "lock", "lease.json"),
@@ -565,6 +586,80 @@ export function parseDistributionRuntimePointer(
     schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
     updatedAt: record.updatedAt,
   };
+}
+
+export function parseDistributionRuntimeAttempt(
+  value: unknown,
+): DistributionRuntimeAttemptV1 {
+  const record = assertRecord(value, "distribution runtime attempt");
+  assertAllowedKeys(record, [
+    "attemptedAt",
+    "channel",
+    "namespace",
+    "protocolVersion",
+    "runtimeDigest",
+    "runtimeVersion",
+    "schemaVersion",
+  ], "distribution runtime attempt");
+  if (record.schemaVersion !== DISTRIBUTION_RUNTIME_SCHEMA_VERSION) {
+    throw new DistributionProtocolError(
+      `unsupported distribution runtime schema version: ${String(record.schemaVersion)}`,
+    );
+  }
+  return {
+    ...normalizeDistributionRuntimeIdentity({
+      channel: record.channel,
+      namespace: record.namespace,
+      protocolVersion: record.protocolVersion,
+      runtimeDigest: record.runtimeDigest,
+      runtimeVersion: record.runtimeVersion,
+    }),
+    attemptedAt: normalizeIsoDate(
+      record.attemptedAt,
+      "distribution runtime attempt attemptedAt",
+    ),
+    schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+  };
+}
+
+function sameDistributionRuntimeIdentity(
+  first: DistributionRuntimeIdentityV1,
+  second: DistributionRuntimeIdentityV1,
+): boolean {
+  return distributionRuntimeIdentityKey(first)
+    === distributionRuntimeIdentityKey(second);
+}
+
+/**
+ * Selects a runtime target without owning filesystem or process lifecycle.
+ *
+ * A confirmed active pointer is the local last-known-good runtime. A matching
+ * attempt marks a requested immutable runtime that failed before confirmation,
+ * so callers should keep serving active until a different release appears.
+ */
+export function selectDistributionRuntimeTarget(input: {
+  active?: DistributionRuntimePointerV1 | null;
+  attempted?: DistributionRuntimeAttemptV1 | null;
+  requested?: DistributionRuntimeIdentityV1 | null;
+}): DistributionRuntimeTargetSelection {
+  const active = input.active ?? null;
+  const attempted = input.attempted ?? null;
+  const requested = input.requested ?? null;
+
+  if (requested == null) {
+    return active == null
+      ? { reason: "no-runtime-target", selected: null }
+      : { reason: "active-offline", selected: "active" };
+  }
+  if (
+    attempted != null
+    && sameDistributionRuntimeIdentity(attempted, requested)
+  ) {
+    return active == null
+      ? { reason: "requested-without-fallback", selected: "requested" }
+      : { reason: "active-after-failed-attempt", selected: "active" };
+  }
+  return { reason: "requested", selected: "requested" };
 }
 
 export function parseDistributionRuntimeLease(

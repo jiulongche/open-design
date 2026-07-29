@@ -16,6 +16,7 @@ import {
   normalizeDistributionRuntimeIdentity,
   normalizeDistributionVersion,
   parseDistributionBuildReport,
+  parseDistributionRuntimeAttempt,
   parseDistributionRuntimeBinding,
   parseDistributionRuntimeLease,
   parseDistributionRuntimePointer,
@@ -24,6 +25,7 @@ import {
   resolveDistributionRuntimeStorePaths,
   resolveDistributionRuntimeVersionPaths,
   resolveDistributionSuitePaths,
+  selectDistributionRuntimeTarget,
   type DistributionIdentityV1,
 } from "../src/index.js";
 
@@ -127,6 +129,9 @@ describe("@open-design/distribution-proto", () => {
     expect(store.activePath).toBe(
       join(suite.runtimeRoot, "store", "state", "active.json"),
     );
+    expect(store.attemptPath).toBe(
+      join(suite.runtimeRoot, "store", "state", "attempt.json"),
+    );
     expect(store.bindingPath).toBe(
       join(suite.runtimeRoot, "store", "state", "binding.json"),
     );
@@ -176,6 +181,63 @@ describe("@open-design/distribution-proto", () => {
       schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
       updatedAt: "2026-07-27T12:00:00.000Z",
     })).toThrow("stable release version must be x.y.z");
+  });
+
+  it("selects a confirmed active runtime offline and after a failed immutable attempt", () => {
+    const active = parseDistributionRuntimePointer({
+      channel: "beta",
+      generation: 3,
+      namespace: "release-beta",
+      protocolVersion: 1,
+      runtimeDigest: DIGEST_A,
+      runtimeVersion: "1.2.3-beta.4",
+      schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+      updatedAt: "2026-07-27T12:00:00.000Z",
+    });
+    const requested = normalizeDistributionRuntimeIdentity({
+      channel: "beta",
+      namespace: "release-beta",
+      protocolVersion: 1,
+      runtimeDigest: DIGEST_B,
+      runtimeVersion: "1.2.4-beta.5",
+    });
+    const attempted = parseDistributionRuntimeAttempt({
+      ...requested,
+      attemptedAt: "2026-07-27T12:05:00.000Z",
+      schemaVersion: DISTRIBUTION_RUNTIME_SCHEMA_VERSION,
+    });
+
+    expect(selectDistributionRuntimeTarget({ active })).toEqual({
+      reason: "active-offline",
+      selected: "active",
+    });
+    expect(selectDistributionRuntimeTarget({
+      active,
+      attempted,
+      requested,
+    })).toEqual({
+      reason: "active-after-failed-attempt",
+      selected: "active",
+    });
+    expect(selectDistributionRuntimeTarget({
+      active,
+      attempted,
+      requested: {
+        ...requested,
+        runtimeDigest: `sha256:${"c".repeat(64)}`,
+        runtimeVersion: "1.2.5-beta.6",
+      },
+    })).toEqual({
+      reason: "requested",
+      selected: "requested",
+    });
+    expect(selectDistributionRuntimeTarget({
+      attempted,
+      requested,
+    })).toEqual({
+      reason: "requested-without-fallback",
+      selected: "requested",
+    });
   });
 
   it("keeps runtime acquisition ownership in the shared distribution lease", () => {
