@@ -1,5 +1,9 @@
 # Codex plugin local distribution and Desktop acceptance
 
+The release-blocking capability ledger and evidence requirements are defined
+in [`codex-plugin-delivery-validation.md`](./codex-plugin-delivery-validation.md).
+This document is the operational runbook for producing that evidence.
+
 The Codex plugin is a distribution shell parallel to packaged Open Design:
 
 ```text
@@ -170,7 +174,9 @@ The required lifecycle sequence is:
 1. Acquire N through the installed plugin and confirm its manifest, binding,
    active pointer, immutable store entry, and ready handoff.
 2. While N remains alive, promote `latest` to N+1 and require the next ensure
-   call to fail closed with `INCOMPATIBLE_RUNTIME_ACTIVE`.
+   call to attach N without waiting for the feed. Require update state
+   `deferred` in the response and persisted `available` after the best-effort
+   background check.
 3. Stop only the exact runtime PID from the confirmed binding. Runtime takeover
    and cross-shell exit orchestration are intentionally outside this cold-start
    scope.
@@ -181,8 +187,8 @@ The required lifecycle sequence is:
    `codex --enable plugins exec --json`; require `attached:true` and
    `reusedArtifact:true` for N+1.
 6. Make the manifest endpoint unavailable, stop N+1 precisely, and require a
-   cold start from the installed N+1 artifact without a remote metadata fetch
-   succeeding.
+   cold start from the installed N+1 artifact after no more than a 500 ms
+   remote budget. Require update state `unavailable`.
 7. Stop that exact offline-started N+1 runtime, then promote to a validly
    hashed N+2 runtime that exits before ready. Require the tool call to fail,
    `attempt.json` to identify N+2, and the active pointer to remain on N+1 with
@@ -212,6 +218,9 @@ For non-interactive CLI acceptance, a mutating MCP tool still follows Codex's
 approval policy. Use an operator-persisted approval or the explicitly
 controlled `--dangerously-bypass-approvals-and-sandbox` acceptance invocation;
 `--ask-for-approval never` cancels the tool call rather than approving it.
+Do not pass `--ignore-user-config`: plugin installation and enablement are
+stored in the managed `CODEX_HOME/config.toml`, so ignoring that configuration
+invalidates the host-integration probe.
 
 ## Production publication
 

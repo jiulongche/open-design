@@ -9,6 +9,7 @@ import {
   type DistributionRuntimeIdentityV1,
   type DistributionServeReportV1,
 } from "@open-design/distribution-proto";
+import type { CodexPluginUpdateCheckV1 } from "@open-design/codex-plugin-proto";
 
 import type { CodexPluginSuiteObservation } from "./suite.js";
 
@@ -38,6 +39,7 @@ export type CodexPluginStatus = {
   fixture: FixtureObservation;
   identity: DistributionIdentityV1;
   suite: CodexPluginSuiteObservation;
+  updateCheck: CodexPluginUpdateCheckV1 | null;
 };
 
 export function currentDistributionIdentity(
@@ -127,6 +129,7 @@ export async function readCodexPluginStatus(options: {
   fixtureReportUrl: string | null;
   identity: DistributionIdentityV1;
   suite: CodexPluginSuiteObservation;
+  updateCheck?: CodexPluginUpdateCheckV1 | null;
 }): Promise<CodexPluginStatus> {
   return {
     fixture: await observeFixture(
@@ -136,5 +139,6 @@ export async function readCodexPluginStatus(options: {
     ),
     identity: options.identity,
     suite: options.suite,
+    updateCheck: options.updateCheck ?? null,
   };
 }

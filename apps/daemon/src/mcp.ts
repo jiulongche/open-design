@@ -14,6 +14,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
   CallToolRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListResourcesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
@@ -35,6 +36,11 @@ import {
   buildProjectRawFileUrl,
   type McpAnalyticsContextResponse,
 } from '@open-design/contracts';
+import {
+  OD_MCP_RESOURCE_TEMPLATES,
+  OD_MCP_STATIC_RESOURCES,
+  OD_MCP_TOOL_DEFS,
+} from '@open-design/contracts/mcp/od-catalog';
 import { randomUUID } from 'node:crypto';
 
 import { postCreateArtifactRequest } from './artifacts/create.js';
@@ -281,15 +287,35 @@ const TEXTUAL_MIME_PATTERNS = [
   /^image\/svg\+xml\b/i,
 ];
 
-// Every tool here is a read against a local daemon owned by the
-// current user, so they're all read-only, idempotent, and operate on
-// a closed (project-scoped) namespace. Pull these into one constant
-// so each tool def doesn't repeat them.
-const READ_ANNOTATIONS = {
-  readOnlyHint: true,
-  idempotentHint: true,
-  openWorldHint: false,
-};
+export async function listMcpResources(baseUrl: string) {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
+  const [skillsData, dsData] = await Promise.all([
+    getJson<SkillsPayload>(`${normalizedBaseUrl}/api/skills`).catch(
+      (): SkillsPayload => ({ skills: [] }),
+    ),
+    getJson<DesignSystemsPayload>(`${normalizedBaseUrl}/api/design-systems`).catch(
+      (): DesignSystemsPayload => ({ designSystems: [] }),
+    ),
+  ]);
+  const resources = [...OD_MCP_STATIC_RESOURCES];
+  for (const skill of skillsData.skills ?? []) {
+    resources.push({
+      description: oneLine(skill.description) ?? '',
+      mimeType: 'text/markdown',
+      name: `Skill: ${skill.name || skill.id}`,
+      uri: `od://skills/${encodeURIComponent(skill.id)}/SKILL.md`,
+    });
+  }
+  for (const designSystem of dsData.designSystems ?? []) {
+    resources.push({
+      description: oneLine(designSystem.summary) ?? '',
+      mimeType: 'text/markdown',
+      name: `Design system: ${designSystem.title || designSystem.name || designSystem.id}`,
+      uri: `od://design-systems/${encodeURIComponent(designSystem.id)}/DESIGN.md`,
+    });
+  }
+  return { resources };
+}
 
 const WRITE_ANNOTATIONS = {
   readOnlyHint: false,
@@ -834,8 +860,56 @@ export const TOOL_DEFS = [
   },
 ];
 
+export async function readMcpResource(baseUrl: string, uri: unknown) {
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
+  if (uri === 'od://focus/active') {
+    const data = await getJson<ActiveContext>(`${normalizedBaseUrl}/api/active`);
+    return {
+      contents: [
+        {
+          mimeType: 'application/json',
+          text: JSON.stringify(data, null, 2),
+          uri,
+        },
+      ],
+    };
+  }
+  const match = String(uri || '').match(
+    /^od:\/\/(skills|design-systems)\/([^/]+)\/(.+)$/,
+  );
+  if (!match) {
+    throw new Error(`unsupported resource URI: ${uri}`);
+  }
+  const [, kind, id] = match as [
+    string,
+    'skills' | 'design-systems',
+    string,
+    string,
+  ];
+  const data = await getJson<ResourcePayload>(
+    `${normalizedBaseUrl}/api/${kind}/${encodeURIComponent(decodeURIComponent(id))}`,
+  );
+  const text =
+    data.skill?.body
+    ?? data.skill?.content
+    ?? data.designSystem?.body
+    ?? data.designSystem?.content
+    ?? data.body
+    ?? data.content
+    ?? '';
+  return {
+    contents: [
+      {
+        mimeType: 'text/markdown',
+        text,
+        uri: String(uri),
+      },
+    ],
+  };
+}
+
 export function localMcpToolDefinitions() {
-  return TOOL_DEFS;
+  return OD_MCP_TOOL_DEFS;
 }
 
 type RuntimeJsonSchema = {
@@ -902,7 +976,7 @@ function validateRuntimeJsonSchema(
 }
 
 function validateMcpToolArgs(name: string, args: McpArgs): void {
-  const definition = TOOL_DEFS.find((tool) => tool.name === name);
+  const definition = OD_MCP_TOOL_DEFS.find((tool) => tool.name === name);
   if (!definition) {
     throw pluginContractError(`unknown MCP tool: ${name}`);
   }
@@ -1767,7 +1841,7 @@ export async function runMcpStdio(options: RunMcpOptions): Promise<void> {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, withMcpActivity(async () => ({
-    tools: TOOL_DEFS,
+    tools: OD_MCP_TOOL_DEFS,
   })));
 
   server.setRequestHandler(ListResourcesRequestSchema, withMcpActivity(async () => {
@@ -1876,6 +1950,10 @@ export async function runMcpStdio(options: RunMcpOptions): Promise<void> {
       ],
     };
   }));
+
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, withMcpActivity(async () => ({
+    resourceTemplates: OD_MCP_RESOURCE_TEMPLATES,
+  })));
 
   server.setRequestHandler(CallToolRequestSchema, withMcpActivity(async (req) => {
     const name = req.params?.name;

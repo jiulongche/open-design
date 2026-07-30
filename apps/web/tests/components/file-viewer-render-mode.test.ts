@@ -343,6 +343,12 @@ describe('htmlNeedsPoweredPreview', () => {
     expect(htmlNeedsPoweredPreview('const b = new SharedArrayBuffer(16);')).toBe(true);
   });
 
+  it('matches direct Web Storage access so Electron does not depend on an opaque srcDoc shim', () => {
+    expect(htmlNeedsPoweredPreview('localStorage.getItem("theme")')).toBe(true);
+    expect(htmlNeedsPoweredPreview('window.sessionStorage.setItem("slide", "2")')).toBe(true);
+    expect(htmlNeedsPoweredPreview('mylocalStorageWrapper')).toBe(false);
+  });
+
   it('matches Web Worker / SharedWorker construction', () => {
     expect(htmlNeedsPoweredPreview("const w = new Worker('sort.js');")).toBe(true);
     expect(htmlNeedsPoweredPreview('new SharedWorker(url)')).toBe(true);

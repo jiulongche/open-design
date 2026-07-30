@@ -232,6 +232,11 @@ export function htmlNeedsFocusGuard(source: string): boolean {
  */
 export function htmlNeedsPoweredPreview(source: string | null | undefined): boolean {
   if (!source) return false;
+  // Web Storage access on an opaque-origin iframe throws before author code
+  // can recover. Chromium/Electron does not reliably allow the srcDoc shim to
+  // replace the Window accessor, so route direct storage users to the
+  // preview-only same-origin host instead of depending on that override.
+  if (/(?:^|[^\w$])(?:localStorage|sessionStorage)(?:[^\w$]|$)/i.test(source)) return true;
   // Hard requirement — SharedArrayBuffer only exists in a crossOriginIsolated
   // document, which ONLY the powered path provides.
   if (/\bSharedArrayBuffer\b/.test(source)) return true;

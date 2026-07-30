@@ -9363,11 +9363,10 @@ function HtmlViewer({
   // When we URL-load the iframe directly, skip every in-host inlining /
   // srcDoc-rebuilding step. The browser does the asset resolution itself,
   // which is the whole point of the URL-load path.
-  // Auto-fall back to the srcDoc path when the artifact will crash under
-  // the URL-load iframe's bare `sandbox="allow-scripts"` — Babel-standalone
-  // React prototypes and any HTML that reads Web Storage at mount throw
-  // SecurityError without `allow-same-origin`. The srcDoc path runs
-  // `injectSandboxShim` before any user script, so those artifacts render.
+  // Detect artifacts that will crash under the default opaque-origin iframe.
+  // Direct Web Storage users are promoted to powered preview below (real
+  // same-origin storage); remaining Babel/external-script cases fall back to
+  // srcDoc, where the compatibility shim is still the best available path.
   // Memoized on `source` so HtmlViewer's frequent re-renders (board/inspect/
   // edit mode toggles, slide nav) don't re-scan the HTML each time.
   const needsSandboxShim = useMemo(() => {

@@ -16,13 +16,16 @@ import {
   CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   CODEX_PLUGIN_RUNTIME_ENV,
   CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
+  CODEX_PLUGIN_UPDATE_CHECK_STATES,
   compareCodexPluginShellVersions,
   parseCodexPluginAcquisitionManifest,
   parseCodexPluginHandoffDescriptor,
   parseCodexPluginRuntimeReady,
+  parseCodexPluginUpdateCheck,
   resolveCodexPluginShellPaths,
   type CodexPluginAcquisitionManifestV1,
   type CodexPluginHandoffDescriptorV1,
+  type CodexPluginUpdateCheckV1,
 } from "@open-design/codex-plugin-proto";
 import {
   DISTRIBUTION_DEFAULT_RUNTIME_LEASE_TTL_MS,
@@ -53,6 +56,7 @@ export type CodexPluginRuntimeEnsureResult = {
   handoff: CodexPluginHandoffDescriptorV1 | null;
   manifest: CodexPluginAcquisitionManifestV1;
   reusedArtifact: boolean;
+  updateCheck: CodexPluginUpdateCheckV1;
 };
 
 export class CodexPluginLauncherError extends Error {
@@ -70,7 +74,14 @@ type RuntimeSession = {
   child: ChildProcess | null;
 };
 
-const RUNTIME_LEASE_ATTACH_TIMEOUT_MS = 15_000;
+export const CODEX_PLUGIN_ACTIVE_MANIFEST_TIMEOUT_MS = 500;
+export const CODEX_PLUGIN_FIRST_MANIFEST_TIMEOUT_MS = 5_000;
+export const CODEX_PLUGIN_LIVE_BINDING_PROBE_TIMEOUT_MS = 400;
+export const CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS = 45_000;
+export const CODEX_PLUGIN_RUNTIME_OBSERVER_TIMEOUT_MS = 50_000;
+
+const RUNTIME_LEASE_ATTACH_TIMEOUT_MS =
+  CODEX_PLUGIN_RUNTIME_OBSERVER_TIMEOUT_MS;
 const RUNTIME_LEASE_POLL_INTERVAL_MS = 250;
 
 function opaqueId(prefix: string): string {
@@ -102,6 +113,25 @@ async function readJsonIfExists(path: string): Promise<unknown | null> {
   return raw == null ? null : JSON.parse(raw) as unknown;
 }
 
+async function readParsedJsonIfExists<T>(options: {
+  code: string;
+  label: string;
+  parse(value: unknown): T;
+  path: string;
+}): Promise<T | null> {
+  try {
+    const raw = await readJsonIfExists(options.path);
+    return raw == null ? null : options.parse(raw);
+  } catch (error) {
+    throw new CodexPluginLauncherError(
+      options.code,
+      `${options.label} is invalid: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { mode: 0o700, recursive: true });
   const tempPath = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
@@ -121,6 +151,18 @@ function runtimeIdentityFromManifest(
     protocolVersion: manifest.protocolVersion,
     runtimeDigest: manifest.runtimeDigest,
     runtimeVersion: manifest.runtimeVersion,
+  });
+}
+
+function runtimeIdentityFromRuntime(
+  runtime: DistributionRuntimeIdentityV1,
+): DistributionRuntimeIdentityV1 {
+  return normalizeDistributionRuntimeIdentity({
+    channel: runtime.channel,
+    namespace: runtime.namespace,
+    protocolVersion: runtime.protocolVersion,
+    runtimeDigest: runtime.runtimeDigest,
+    runtimeVersion: runtime.runtimeVersion,
   });
 }
 
@@ -176,11 +218,12 @@ async function fetchJson(
 async function observeBinding(
   binding: DistributionRuntimeBindingV1,
   fetchImpl: typeof fetch,
+  timeoutMs = CODEX_PLUGIN_LIVE_BINDING_PROBE_TIMEOUT_MS,
 ): Promise<boolean> {
   if (!isProcessAlive(binding.owner.pid)) return false;
   try {
     const actual = normalizeDistributionRuntimeIdentity(
-      await fetchJson(binding.endpointUrl, fetchImpl, 2_000),
+      await fetchJson(binding.endpointUrl, fetchImpl, timeoutMs),
     );
     assertSameDistributionRuntimeIdentity(binding, actual);
     return true;
@@ -194,9 +237,13 @@ async function readCompatibleBinding(options: {
   fetchImpl: typeof fetch;
   path: string;
 }): Promise<DistributionRuntimeBindingV1 | null> {
-  const raw = await readJsonIfExists(options.path);
-  if (raw == null) return null;
-  const binding = parseDistributionRuntimeBinding(raw);
+  const binding = await readParsedJsonIfExists({
+    code: "RUNTIME_BINDING_STATE_INVALID",
+    label: "runtime binding state",
+    parse: parseDistributionRuntimeBinding,
+    path: options.path,
+  });
+  if (binding == null) return null;
   try {
     assertSameDistributionRuntimeIdentity(options.expected, binding);
   } catch {
@@ -221,9 +268,13 @@ async function readCompatibleBinding(options: {
 async function removeDeadRuntimeBinding(options: {
   path: string;
 }): Promise<void> {
-  const raw = await readJsonIfExists(options.path);
-  if (raw == null) return;
-  const binding = parseDistributionRuntimeBinding(raw);
+  const binding = await readParsedJsonIfExists({
+    code: "RUNTIME_BINDING_STATE_INVALID",
+    label: "runtime binding state",
+    parse: parseDistributionRuntimeBinding,
+    path: options.path,
+  });
+  if (binding == null) return;
   if (isProcessAlive(binding.owner.pid)) {
     throw new CodexPluginLauncherError(
       "RUNTIME_BINDING_LIVE",
@@ -244,14 +295,18 @@ async function acquireRuntimeLease(options: {
     await mkdir(options.lockRoot, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const existingRaw = await readJsonIfExists(options.leasePath);
-    if (existingRaw == null) {
+    const existing = await readParsedJsonIfExists({
+      code: "RUNTIME_LEASE_STATE_INVALID",
+      label: "runtime lease state",
+      parse: parseDistributionRuntimeLease,
+      path: options.leasePath,
+    });
+    if (existing == null) {
       throw new CodexPluginLauncherError(
         "RUNTIME_LOCK_UNKNOWN",
         "runtime acquisition lock exists without a readable lease",
       );
     }
-    const existing = parseDistributionRuntimeLease(existingRaw);
     throw new CodexPluginLauncherError(
       isDistributionRuntimeLeaseExpired(existing)
         ? "RUNTIME_LEASE_EXPIRED"
@@ -316,9 +371,13 @@ async function acquireRuntimeLeaseOrAttach(options: {
       ) {
         throw error;
       }
-      const leaseRaw = await readJsonIfExists(options.leasePath);
-      if (leaseRaw != null) {
-        const lease = parseDistributionRuntimeLease(leaseRaw);
+      const lease = await readParsedJsonIfExists({
+        code: "RUNTIME_LEASE_STATE_INVALID",
+        label: "runtime lease state",
+        parse: parseDistributionRuntimeLease,
+        path: options.leasePath,
+      });
+      if (lease != null) {
         if (
           isDistributionRuntimeLeaseExpired(lease)
           && !isProcessAlive(lease.owner.pid)
@@ -343,9 +402,13 @@ async function releaseRuntimeLease(options: {
   leasePath: string;
   lockRoot: string;
 }): Promise<void> {
-  const raw = await readJsonIfExists(options.leasePath);
-  if (raw == null) return;
-  const current = parseDistributionRuntimeLease(raw);
+  const current = await readParsedJsonIfExists({
+    code: "RUNTIME_LEASE_STATE_INVALID",
+    label: "runtime lease state",
+    parse: parseDistributionRuntimeLease,
+    path: options.leasePath,
+  });
+  if (current == null) return;
   if (current.leaseId !== options.lease.leaseId) {
     throw new CodexPluginLauncherError(
       "RUNTIME_LEASE_REPLACED",
@@ -516,19 +579,41 @@ async function readCompatibleActiveRuntime(options: {
   manifest: CodexPluginAcquisitionManifestV1;
   pointer: DistributionRuntimePointerV1;
 } | null> {
-  const pointerRaw = await readJsonIfExists(options.storePaths.activePath);
-  if (pointerRaw == null) return null;
-  const pointer = parseDistributionRuntimePointer(pointerRaw);
+  const pointer = await readParsedJsonIfExists({
+    code: "RUNTIME_ACTIVE_STATE_INVALID",
+    label: "active runtime pointer",
+    parse: parseDistributionRuntimePointer,
+    path: options.storePaths.activePath,
+  });
+  if (pointer == null) return null;
   const versionPaths = resolveDistributionRuntimeVersionPaths({
     runtimeDigest: pointer.runtimeDigest,
     runtimeVersion: pointer.runtimeVersion,
     storePaths: options.storePaths,
   });
-  const manifestRaw = await readJsonIfExists(versionPaths.manifestPath);
-  if (manifestRaw == null) return null;
-  const manifest = parseCodexPluginAcquisitionManifest(manifestRaw);
+  const manifest = await readParsedJsonIfExists({
+    code: "RUNTIME_MANIFEST_STATE_INVALID",
+    label: "installed runtime manifest",
+    parse: parseCodexPluginAcquisitionManifest,
+    path: versionPaths.manifestPath,
+  });
+  if (manifest == null) {
+    throw new CodexPluginLauncherError(
+      "RUNTIME_MANIFEST_STATE_INVALID",
+      `active runtime manifest is missing for ${pointer.runtimeVersion}`,
+    );
+  }
   const identity = runtimeIdentityFromManifest(manifest);
-  assertSameDistributionRuntimeIdentity(pointer, identity);
+  try {
+    assertSameDistributionRuntimeIdentity(pointer, identity);
+  } catch (error) {
+    throw new CodexPluginLauncherError(
+      "RUNTIME_MANIFEST_STATE_INVALID",
+      `installed runtime manifest does not match active pointer: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
   if (
     compareCodexPluginShellVersions(
       options.shellVersion,
@@ -600,6 +685,30 @@ async function stopFailedRuntime(child: ChildProcess): Promise<void> {
   }
 }
 
+function sameRuntimeIdentity(
+  left: DistributionRuntimeIdentityV1,
+  right: DistributionRuntimeIdentityV1,
+): boolean {
+  try {
+    assertSameDistributionRuntimeIdentity(left, right);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function updateCheckError(error: unknown): {
+  code: string;
+  message: string;
+} {
+  return {
+    code: error instanceof CodexPluginLauncherError
+      ? error.code
+      : "RUNTIME_UPDATE_CHECK_FAILED",
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
 export class CodexPluginRuntimeLauncher {
   private readonly fetchImpl: typeof fetch;
   private readonly identity: DistributionIdentityV1;
@@ -607,6 +716,9 @@ export class CodexPluginRuntimeLauncher {
   private readonly shellVersion: string;
   private readonly suitePaths: DistributionSuitePaths;
   private session: RuntimeSession | null = null;
+  private updateCheckGeneration = 0;
+  private updateCheckPromise: Promise<void> | null = null;
+  private updateStatus: CodexPluginUpdateCheckV1 | null = null;
 
   constructor(options: {
     fetchImpl?: typeof fetch;
@@ -622,14 +734,198 @@ export class CodexPluginRuntimeLauncher {
     this.suitePaths = options.suitePaths;
   }
 
+  private createUpdateStatus(options:
+    | {
+        active: DistributionRuntimeIdentityV1;
+        state:
+          | typeof CODEX_PLUGIN_UPDATE_CHECK_STATES.CURRENT
+          | typeof CODEX_PLUGIN_UPDATE_CHECK_STATES.DEFERRED;
+      }
+    | {
+        active?: DistributionRuntimeIdentityV1;
+        candidate: DistributionRuntimeIdentityV1;
+        minimumShellVersion: string;
+        shellUpdateUrl?: string;
+        state: typeof CODEX_PLUGIN_UPDATE_CHECK_STATES.AVAILABLE;
+      }
+    | {
+        active?: DistributionRuntimeIdentityV1;
+        error: unknown;
+        state: typeof CODEX_PLUGIN_UPDATE_CHECK_STATES.UNAVAILABLE;
+      }
+  ): CodexPluginUpdateCheckV1 {
+    return parseCodexPluginUpdateCheck({
+      ...("active" in options && options.active != null
+        ? { active: runtimeIdentityFromRuntime(options.active) }
+        : {}),
+      ...("candidate" in options
+        ? {
+            candidate: runtimeIdentityFromRuntime(options.candidate),
+          }
+        : {}),
+      ...("error" in options
+        ? { error: updateCheckError(options.error) }
+        : {}),
+      ...("minimumShellVersion" in options
+        ? { minimumShellVersion: options.minimumShellVersion }
+        : {}),
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+      ...("shellUpdateUrl" in options && options.shellUpdateUrl != null
+        ? { shellUpdateUrl: options.shellUpdateUrl }
+        : {}),
+      state: options.state,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  private async persistUpdateStatus(
+    status: CodexPluginUpdateCheckV1,
+    generation = this.updateCheckGeneration,
+  ): Promise<void> {
+    if (generation !== this.updateCheckGeneration) return;
+    this.updateStatus = status;
+    const shellPaths = resolveCodexPluginShellPaths(this.suitePaths);
+    await writeJsonAtomic(shellPaths.updateCheckPath, status);
+  }
+
+  async readUpdateStatus(): Promise<CodexPluginUpdateCheckV1 | null> {
+    if (this.updateStatus != null) return this.updateStatus;
+    const shellPaths = resolveCodexPluginShellPaths(this.suitePaths);
+    const status = await readParsedJsonIfExists({
+      code: "RUNTIME_UPDATE_STATE_INVALID",
+      label: "runtime update check state",
+      parse: parseCodexPluginUpdateCheck,
+      path: shellPaths.updateCheckPath,
+    });
+    this.updateStatus = status;
+    return status;
+  }
+
+  private async fetchRequestedManifest(
+    timeoutMs: number,
+  ): Promise<CodexPluginAcquisitionManifestV1> {
+    let raw: unknown;
+    try {
+      raw = await fetchJson(this.manifestUrl, this.fetchImpl, timeoutMs);
+    } catch (error) {
+      throw error;
+    }
+    let manifest: CodexPluginAcquisitionManifestV1;
+    try {
+      manifest = parseCodexPluginAcquisitionManifest(raw);
+    } catch (error) {
+      throw new CodexPluginLauncherError(
+        "RUNTIME_MANIFEST_INVALID",
+        `requested runtime manifest is invalid: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    const requestedIdentity = runtimeIdentityFromManifest(manifest);
+    assertRuntimeCoordinates(this.identity, requestedIdentity);
+    return manifest;
+  }
+
+  private updateStatusForManifest(options: {
+    active?: DistributionRuntimeIdentityV1;
+    manifest: CodexPluginAcquisitionManifestV1;
+  }): CodexPluginUpdateCheckV1 {
+    const candidate = runtimeIdentityFromManifest(options.manifest);
+    if (
+      options.active != null
+      && sameRuntimeIdentity(options.active, candidate)
+    ) {
+      return this.createUpdateStatus({
+        active: options.active,
+        state: CODEX_PLUGIN_UPDATE_CHECK_STATES.CURRENT,
+      });
+    }
+    return this.createUpdateStatus({
+      ...(options.active == null ? {} : { active: options.active }),
+      candidate,
+      minimumShellVersion:
+        options.manifest.control.codexPlugin.version.min,
+      ...(options.manifest.control.codexPlugin.version.url == null
+        ? {}
+        : {
+            shellUpdateUrl:
+              options.manifest.control.codexPlugin.version.url,
+          }),
+      state: CODEX_PLUGIN_UPDATE_CHECK_STATES.AVAILABLE,
+    });
+  }
+
+  private scheduleBackgroundUpdateCheck(
+    active: DistributionRuntimeIdentityV1,
+  ): CodexPluginUpdateCheckV1 {
+    const deferred = this.createUpdateStatus({
+      active,
+      state: CODEX_PLUGIN_UPDATE_CHECK_STATES.DEFERRED,
+    });
+    this.updateStatus = deferred;
+    if (this.updateCheckPromise != null) return deferred;
+    const generation = ++this.updateCheckGeneration;
+    const shellPaths = resolveCodexPluginShellPaths(this.suitePaths);
+    const pending = (async () => {
+      await this.persistUpdateStatus(deferred, generation);
+      try {
+        const manifest = await this.fetchRequestedManifest(
+          CODEX_PLUGIN_FIRST_MANIFEST_TIMEOUT_MS,
+        );
+        if (generation !== this.updateCheckGeneration) return;
+        await writeJsonAtomic(shellPaths.acquisitionPath, manifest);
+        await this.persistUpdateStatus(this.updateStatusForManifest({
+          active,
+          manifest,
+        }), generation);
+      } catch (error) {
+        await this.persistUpdateStatus(this.createUpdateStatus({
+          active,
+          error,
+          state: CODEX_PLUGIN_UPDATE_CHECK_STATES.UNAVAILABLE,
+        }), generation).catch(() => undefined);
+      }
+    })().catch(() => undefined).finally(() => {
+      if (this.updateCheckPromise === pending) {
+        this.updateCheckPromise = null;
+      }
+    });
+    this.updateCheckPromise = pending;
+    return deferred;
+  }
+
+  private async settleUpdateStatusForBinding(
+    status: CodexPluginUpdateCheckV1,
+    binding: DistributionRuntimeBindingV1,
+    generation: number,
+  ): Promise<CodexPluginUpdateCheckV1> {
+    if (
+      status.state !== CODEX_PLUGIN_UPDATE_CHECK_STATES.AVAILABLE
+      || status.candidate == null
+      || !sameRuntimeIdentity(status.candidate, binding)
+    ) {
+      return status;
+    }
+    const current = this.createUpdateStatus({
+      active: binding,
+      state: CODEX_PLUGIN_UPDATE_CHECK_STATES.CURRENT,
+    });
+    await this.persistUpdateStatus(current, generation);
+    return current;
+  }
+
   async stopOwnedRuntime(): Promise<void> {
     const session = this.session;
     if (session?.child == null) return;
     await stopFailedRuntime(session.child);
     const storePaths = resolveDistributionRuntimeStorePaths(this.suitePaths);
-    const raw = await readJsonIfExists(storePaths.bindingPath);
-    if (raw != null) {
-      const binding = parseDistributionRuntimeBinding(raw);
+    const binding = await readParsedJsonIfExists({
+      code: "RUNTIME_BINDING_STATE_INVALID",
+      label: "runtime binding state",
+      parse: parseDistributionRuntimeBinding,
+      path: storePaths.bindingPath,
+    });
+    if (binding != null) {
       if (
         binding.owner.shellType === DISTRIBUTION_SHELL_TYPES.CODEX_PLUGIN
         && binding.owner.pid === session.binding.owner.pid
@@ -650,27 +946,94 @@ export class CodexPluginRuntimeLauncher {
     if (activeRuntime != null) {
       assertRuntimeCoordinates(this.identity, activeRuntime.pointer);
     }
-    let requestedPayload: { value: unknown } | null = null;
-    let requestedManifest: CodexPluginAcquisitionManifestV1 | null = null;
-    let requestError: unknown = null;
-    try {
-      requestedPayload = {
-        value: await fetchJson(this.manifestUrl, this.fetchImpl, 5_000),
-      };
-    } catch (error) {
-      requestError = error;
-    }
-    if (requestedPayload != null) {
-      requestedManifest = parseCodexPluginAcquisitionManifest(
-        requestedPayload.value,
-      );
+
+    if (activeRuntime != null && this.session != null) {
+      if (
+        !sameRuntimeIdentity(activeRuntime.pointer, this.session.binding)
+        && isProcessAlive(this.session.binding.owner.pid)
+      ) {
+        throw new CodexPluginLauncherError(
+          "INCOMPATIBLE_RUNTIME_ACTIVE",
+          "an incompatible Open Design runtime is active for this channel and namespace",
+        );
+      }
+      if (
+        sameRuntimeIdentity(activeRuntime.pointer, this.session.binding)
+        && await observeBinding(this.session.binding, this.fetchImpl)
+      ) {
+        const updateCheck = this.scheduleBackgroundUpdateCheck(
+          activeRuntime.pointer,
+        );
+        return {
+          attached: true,
+          binding: this.session.binding,
+          handoff: null,
+          manifest: activeRuntime.manifest,
+          reusedArtifact: true,
+          updateCheck,
+        };
+      }
+      if (isProcessAlive(this.session.binding.owner.pid)) {
+        throw new CodexPluginLauncherError(
+          "RUNTIME_BINDING_UNHEALTHY",
+          `the compatible Open Design runtime pid ${this.session.binding.owner.pid} is alive but not observable`,
+        );
+      }
+      this.session = null;
     }
 
-    if (requestedManifest == null && activeRuntime == null) throw requestError;
-    if (requestedManifest != null) {
-      const requestedIdentity = runtimeIdentityFromManifest(requestedManifest);
-      assertRuntimeCoordinates(this.identity, requestedIdentity);
+    if (activeRuntime != null) {
+      const existingActive = await readCompatibleBinding({
+        expected: activeRuntime.pointer,
+        fetchImpl: this.fetchImpl,
+        path: storePaths.bindingPath,
+      });
+      if (existingActive != null) {
+        this.session = { binding: existingActive, child: null };
+        const updateCheck = this.scheduleBackgroundUpdateCheck(
+          activeRuntime.pointer,
+        );
+        return {
+          attached: true,
+          binding: existingActive,
+          handoff: null,
+          manifest: activeRuntime.manifest,
+          reusedArtifact: true,
+          updateCheck,
+        };
+      }
+    }
+
+    const updateGeneration = ++this.updateCheckGeneration;
+    let requestedManifest: CodexPluginAcquisitionManifestV1 | null = null;
+    let updateCheck: CodexPluginUpdateCheckV1;
+    try {
+      requestedManifest = await this.fetchRequestedManifest(
+        activeRuntime == null
+          ? CODEX_PLUGIN_FIRST_MANIFEST_TIMEOUT_MS
+          : CODEX_PLUGIN_ACTIVE_MANIFEST_TIMEOUT_MS,
+      );
       await writeJsonAtomic(shellPaths.acquisitionPath, requestedManifest);
+      updateCheck = this.updateStatusForManifest({
+        ...(activeRuntime == null ? {} : { active: activeRuntime.pointer }),
+        manifest: requestedManifest,
+      });
+      await this.persistUpdateStatus(updateCheck, updateGeneration);
+    } catch (error) {
+      updateCheck = this.createUpdateStatus({
+        ...(activeRuntime == null ? {} : { active: activeRuntime.pointer }),
+        error,
+        state: CODEX_PLUGIN_UPDATE_CHECK_STATES.UNAVAILABLE,
+      });
+      await this.persistUpdateStatus(updateCheck, updateGeneration);
+      if (activeRuntime == null) {
+        throw new CodexPluginLauncherError(
+          "RUNTIME_UNAVAILABLE",
+          `no compatible local runtime is installed and the requested runtime is unavailable: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
     }
 
     let armAttempt = false;
@@ -690,12 +1053,23 @@ export class CodexPluginRuntimeLauncher {
       }
       manifest = activeRuntime.manifest;
     } else {
-      const attemptRaw = await readJsonIfExists(storePaths.attemptPath);
-      const attempted = attemptRaw == null
-        ? null
-        : parseDistributionRuntimeAttempt(attemptRaw);
+      const attempted = await readParsedJsonIfExists({
+        code: "RUNTIME_ATTEMPT_STATE_INVALID",
+        label: "runtime attempt state",
+        parse: parseDistributionRuntimeAttempt,
+        path: storePaths.attemptPath,
+      });
       if (attempted != null) {
-        assertRuntimeCoordinates(this.identity, attempted);
+        try {
+          assertRuntimeCoordinates(this.identity, attempted);
+        } catch (error) {
+          throw new CodexPluginLauncherError(
+            "RUNTIME_ATTEMPT_STATE_INVALID",
+            `runtime attempt coordinates are invalid: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
       }
       const requestedIdentity = requestedManifest == null
         ? null
@@ -711,7 +1085,7 @@ export class CodexPluginRuntimeLauncher {
         manifest = requestedManifest;
         armAttempt = true;
       } else {
-        throw requestError ?? new CodexPluginLauncherError(
+        throw new CodexPluginLauncherError(
           "RUNTIME_UNAVAILABLE",
           "no compatible local or requested Codex plugin runtime is available",
         );
@@ -725,12 +1099,18 @@ export class CodexPluginRuntimeLauncher {
       && await observeBinding(this.session.binding, this.fetchImpl)
     ) {
       assertSameDistributionRuntimeIdentity(expected, this.session.binding);
+      updateCheck = await this.settleUpdateStatusForBinding(
+        updateCheck,
+        this.session.binding,
+        updateGeneration,
+      );
       return {
         attached: true,
         binding: this.session.binding,
         handoff: null,
         manifest,
         reusedArtifact: true,
+        updateCheck,
       };
     }
 
@@ -741,12 +1121,18 @@ export class CodexPluginRuntimeLauncher {
     });
     if (existing != null) {
       this.session = { binding: existing, child: null };
+      updateCheck = await this.settleUpdateStatusForBinding(
+        updateCheck,
+        existing,
+        updateGeneration,
+      );
       return {
         attached: true,
         binding: existing,
         handoff: null,
         manifest,
         reusedArtifact: true,
+        updateCheck,
       };
     }
 
@@ -761,12 +1147,18 @@ export class CodexPluginRuntimeLauncher {
     });
     if (acquisition.binding != null) {
       this.session = { binding: acquisition.binding, child: null };
+      updateCheck = await this.settleUpdateStatusForBinding(
+        updateCheck,
+        acquisition.binding,
+        updateGeneration,
+      );
       return {
         attached: true,
         binding: acquisition.binding,
         handoff: null,
         manifest,
         reusedArtifact: true,
+        updateCheck,
       };
     }
     const lease = acquisition.lease;
@@ -805,6 +1197,11 @@ export class CodexPluginRuntimeLauncher {
       });
       if (concurrent != null) {
         this.session = { binding: concurrent, child: null };
+        updateCheck = await this.settleUpdateStatusForBinding(
+          updateCheck,
+          concurrent,
+          updateGeneration,
+        );
         await releaseRuntimeLease({
           lease,
           leasePath: storePaths.leasePath,
@@ -816,6 +1213,7 @@ export class CodexPluginRuntimeLauncher {
           handoff: null,
           manifest,
           reusedArtifact: true,
+          updateCheck,
         };
       }
       await removeDeadRuntimeBinding({ path: storePaths.bindingPath });
@@ -864,7 +1262,11 @@ export class CodexPluginRuntimeLauncher {
           windowsHide: true,
         },
       );
-      const ready = await waitForRuntimeReady(readyPath, child, 45_000)
+      const ready = await waitForRuntimeReady(
+        readyPath,
+        child,
+        CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS,
+      )
         .finally(async () => {
           await rm(readyPath, { force: true });
         });
@@ -894,10 +1296,12 @@ export class CodexPluginRuntimeLauncher {
         await fetchJson(ready.endpointUrl, this.fetchImpl, 5_000),
       );
       assertSameDistributionRuntimeIdentity(expected, observed);
-      const previousPointerRaw = await readJsonIfExists(storePaths.activePath);
-      const previousPointer = previousPointerRaw == null
-        ? null
-        : parseDistributionRuntimePointer(previousPointerRaw);
+      const previousPointer = await readParsedJsonIfExists({
+        code: "RUNTIME_ACTIVE_STATE_INVALID",
+        label: "active runtime pointer",
+        parse: parseDistributionRuntimePointer,
+        path: storePaths.activePath,
+      });
       if (
         previousPointer != null
         && (
@@ -940,6 +1344,11 @@ export class CodexPluginRuntimeLauncher {
       await writeJsonAtomic(handoffPath, handoff);
       child.unref();
       this.session = { binding, child };
+      updateCheck = await this.settleUpdateStatusForBinding(
+        updateCheck,
+        binding,
+        updateGeneration,
+      );
       await releaseRuntimeLease({
         lease,
         leasePath: storePaths.leasePath,
@@ -951,6 +1360,7 @@ export class CodexPluginRuntimeLauncher {
         handoff,
         manifest,
         reusedArtifact: acquired.reused,
+        updateCheck,
       };
     } catch (error) {
       if (child != null) await stopFailedRuntime(child);

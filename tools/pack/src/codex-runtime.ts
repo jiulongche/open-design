@@ -112,12 +112,13 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const env = ${JSON.stringify(CODEX_PLUGIN_RUNTIME_ENV)};
 const runtimeRoot = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(runtimeRoot, "node_modules");
 const daemonCli = join(projectRoot, "@open-design", "daemon", "dist", "cli.js");
+const daemonMcp = join(projectRoot, "@open-design", "daemon", "dist", "mcp.js");
 const resourceRoot = join(projectRoot, "open-design");
 const logsRoot = process.env[env.LOGS_ROOT];
 const logPath = join(logsRoot, "runtime", "latest.log");
@@ -184,10 +185,64 @@ if (!health.ok) {
 }
 await appendFile(logPath, "[codex-plugin-runtime] ready daemon=" + daemonUrl + "\\n", "utf8");
 
-const identityServer = createServer((_request, response) => {
-  response.statusCode = 200;
+const {
+  handleMcpToolCall,
+  listMcpResources,
+  readMcpResource,
+} = await import(pathToFileURL(daemonMcp).href);
+
+const sendJson = (response, statusCode, payload) => {
+  response.statusCode = statusCode;
   response.setHeader("content-type", "application/json; charset=utf-8");
-  response.end(JSON.stringify(identity) + "\\n");
+  response.end(JSON.stringify(payload) + "\\n");
+};
+const readJsonBody = async (request) => {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 16 * 1024 * 1024) {
+      throw new Error("runtime MCP request body exceeds 16 MiB");
+    }
+    chunks.push(chunk);
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
+  return text.length === 0 ? {} : JSON.parse(text);
+};
+
+const identityServer = createServer(async (request, response) => {
+  try {
+    const requestUrl = new URL(request.url || "/", "http://127.0.0.1");
+    if (request.method === "GET" && requestUrl.pathname === "/status") {
+      sendJson(response, 200, identity);
+      return;
+    }
+    if (request.method !== "POST" || requestUrl.pathname !== "/mcp") {
+      sendJson(response, 404, { error: "not found" });
+      return;
+    }
+    const message = await readJsonBody(request);
+    let result;
+    if (message.method === "tools/call") {
+      result = await handleMcpToolCall(
+        daemonUrl,
+        message.params?.name,
+        message.params?.arguments ?? {},
+      );
+    } else if (message.method === "resources/list") {
+      result = await listMcpResources(daemonUrl);
+    } else if (message.method === "resources/read") {
+      result = await readMcpResource(daemonUrl, message.params?.uri);
+    } else {
+      sendJson(response, 400, { error: "unsupported runtime MCP method" });
+      return;
+    }
+    sendJson(response, 200, result);
+  } catch (error) {
+    sendJson(response, 500, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 });
 await new Promise((resolveListen, rejectListen) => {
   identityServer.once("error", rejectListen);

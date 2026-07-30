@@ -970,6 +970,82 @@ describe('run event log persistence', () => {
     });
   });
 
+  it('reads terminal status and events after a cold restart without restoring live ownership', async () => {
+    const writer = createRunsWithLog(tmpDir);
+    const run = writer.create({
+      projectId: 'p1',
+      conversationId: 'c1',
+      assistantMessageId: 'm1',
+      agentId: 'codex',
+    });
+    run.artifactCount = 1;
+    writer.emit(run, 'agent', { type: 'text_delta', delta: 'finished output' });
+    writer.finish(run, 'succeeded', 0, null);
+
+    const eventsPath = path.join(tmpDir, run.id, 'events.jsonl');
+    for (let i = 0; i < 50; i++) {
+      if (fs.existsSync(eventsPath) && fs.readFileSync(eventsPath, 'utf8').includes('finished output')) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    const restarted = createRunsWithLog(tmpDir);
+    expect(restarted.get(run.id)).toMatchObject({
+      id: run.id,
+      status: 'succeeded',
+      child: null,
+      eventsLogClosed: true,
+    });
+    const persisted = restarted.getPersistedTerminal(run.id);
+
+    expect(persisted).not.toBeNull();
+    if (!persisted) throw new Error('expected persisted terminal run');
+    expect(persisted).toMatchObject({
+      id: run.id,
+      projectId: 'p1',
+      conversationId: 'c1',
+      assistantMessageId: 'm1',
+      agentId: 'codex',
+      status: 'succeeded',
+      exitCode: 0,
+      artifactCount: 1,
+      persistedTerminal: true,
+    });
+    expect(persisted.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event: 'agent',
+        data: { type: 'text_delta', delta: 'finished output' },
+      }),
+      expect.objectContaining({ event: 'end', data: expect.objectContaining({ status: 'succeeded' }) }),
+    ]));
+    expect(restarted.statusBody(persisted)).toMatchObject({
+      id: run.id,
+      status: 'succeeded',
+      artifactCount: 1,
+      childPid: null,
+      childExited: true,
+      eventsLogPath: eventsPath,
+    });
+  });
+
+  it('refuses non-terminal, mismatched, and path-like persisted run identities', () => {
+    const writer = createRunsWithLog(tmpDir);
+    const queued = writer.create({ projectId: 'p1' });
+    expect(writer.getPersistedTerminal(queued.id)).toBeNull();
+
+    const statePath = path.join(tmpDir, queued.id, 'state.json');
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    fs.writeFileSync(statePath, JSON.stringify({
+      ...state,
+      id: 'different-run',
+      status: 'failed',
+    }));
+
+    expect(writer.getPersistedTerminal(queued.id)).toBeNull();
+    expect(writer.getPersistedTerminal('../state.json')).toBeNull();
+  });
+
   it('persists native session recovery diagnostics in the run event log', async () => {
     const runs = createRunsWithLog(tmpDir);
     const run = runs.create({ projectId: 'p1' });

@@ -5,9 +5,11 @@ import {
   normalizeDistributionDigest,
   normalizeDistributionInventoryPath,
   normalizeDistributionNamespace,
+  normalizeDistributionRuntimeIdentity,
   normalizeDistributionRuntimeVersion,
   normalizeDistributionVersion,
   parseDistributionServeReport,
+  type DistributionRuntimeIdentityV1,
   type DistributionServeReportV1,
   type DistributionSuitePaths,
 } from "@open-design/distribution-proto";
@@ -72,6 +74,16 @@ export const CODEX_PLUGIN_HANDOFF_STATES = Object.freeze({
 export type CodexPluginHandoffState =
   (typeof CODEX_PLUGIN_HANDOFF_STATES)[keyof typeof CODEX_PLUGIN_HANDOFF_STATES];
 
+export const CODEX_PLUGIN_UPDATE_CHECK_STATES = Object.freeze({
+  AVAILABLE: "available",
+  CURRENT: "current",
+  DEFERRED: "deferred",
+  UNAVAILABLE: "unavailable",
+} as const);
+
+export type CodexPluginUpdateCheckState =
+  (typeof CODEX_PLUGIN_UPDATE_CHECK_STATES)[keyof typeof CODEX_PLUGIN_UPDATE_CHECK_STATES];
+
 export type CodexPluginRuntimeArtifactV1 = {
   digest: string;
   entryPath: string;
@@ -106,7 +118,22 @@ export type CodexPluginShellPaths = {
   runtimeRoot: string;
   shellRoot: string;
   stateRoot: string;
+  updateCheckPath: string;
   updatesRoot: string;
+};
+
+export type CodexPluginUpdateCheckV1 = {
+  active?: DistributionRuntimeIdentityV1;
+  candidate?: DistributionRuntimeIdentityV1;
+  error?: {
+    code: string;
+    message: string;
+  };
+  minimumShellVersion?: string;
+  schemaVersion: typeof CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION;
+  shellUpdateUrl?: string;
+  state: CodexPluginUpdateCheckState;
+  updatedAt: string;
 };
 
 export type CodexPluginHandoffRuntimeV1 = {
@@ -394,6 +421,7 @@ export function resolveCodexPluginShellPaths(
     runtimeRoot: join(shellRoot, "runtime"),
     shellRoot,
     stateRoot,
+    updateCheckPath: join(stateRoot, "update-check.json"),
     updatesRoot: join(shellRoot, "updates"),
   };
 }
@@ -528,6 +556,129 @@ export function parseCodexPluginAcquisitionManifest(
       channel,
     ),
     schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+  };
+}
+
+export function parseCodexPluginUpdateCheck(
+  value: unknown,
+): CodexPluginUpdateCheckV1 {
+  const record = assertRecord(value, "Codex plugin update check");
+  assertAllowedKeys(record, [
+    "active",
+    "candidate",
+    "error",
+    "minimumShellVersion",
+    "schemaVersion",
+    "shellUpdateUrl",
+    "state",
+    "updatedAt",
+  ], "Codex plugin update check");
+  if (record.schemaVersion !== CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION) {
+    throw new CodexPluginProtocolError(
+      `unsupported Codex plugin protocol schema version: ${String(record.schemaVersion)}`,
+    );
+  }
+  const states = Object.values(CODEX_PLUGIN_UPDATE_CHECK_STATES);
+  if (
+    typeof record.state !== "string"
+    || !states.includes(record.state as CodexPluginUpdateCheckState)
+  ) {
+    throw new CodexPluginProtocolError(
+      `unsupported Codex plugin update check state: ${String(record.state)}`,
+    );
+  }
+  const state = record.state as CodexPluginUpdateCheckState;
+  const active = record.active == null
+    ? undefined
+    : normalizeDistributionRuntimeIdentity(record.active);
+  const candidate = record.candidate == null
+    ? undefined
+    : normalizeDistributionRuntimeIdentity(record.candidate);
+  const minimumShellVersion = record.minimumShellVersion == null
+    ? undefined
+    : normalizeDistributionVersion(
+        record.minimumShellVersion,
+        "minimum Codex plugin shell version",
+      );
+  const shellUpdateUrl = record.shellUpdateUrl == null
+    ? undefined
+    : normalizeRuntimeUrl(
+        record.shellUpdateUrl,
+        "Codex plugin shell update URL",
+      );
+  let error: CodexPluginUpdateCheckV1["error"];
+  if (record.error != null) {
+    const errorRecord = assertRecord(
+      record.error,
+      "Codex plugin update check error",
+    );
+    assertAllowedKeys(
+      errorRecord,
+      ["code", "message"],
+      "Codex plugin update check error",
+    );
+    error = {
+      code: normalizeErrorCode(errorRecord.code),
+      message: normalizeNonEmptyString(
+        errorRecord.message,
+        "update check error message",
+      ),
+    };
+  }
+  if (
+    (state === CODEX_PLUGIN_UPDATE_CHECK_STATES.CURRENT
+      || state === CODEX_PLUGIN_UPDATE_CHECK_STATES.DEFERRED)
+    && active == null
+  ) {
+    throw new CodexPluginProtocolError(
+      `${state} Codex plugin update check requires an active runtime`,
+    );
+  }
+  if (
+    state === CODEX_PLUGIN_UPDATE_CHECK_STATES.AVAILABLE
+    && (candidate == null || minimumShellVersion == null)
+  ) {
+    throw new CodexPluginProtocolError(
+      "available Codex plugin update check requires a candidate runtime and minimum shell version",
+    );
+  }
+  if (
+    state === CODEX_PLUGIN_UPDATE_CHECK_STATES.UNAVAILABLE
+    && error == null
+  ) {
+    throw new CodexPluginProtocolError(
+      "unavailable Codex plugin update check requires an error",
+    );
+  }
+  if (
+    state !== CODEX_PLUGIN_UPDATE_CHECK_STATES.AVAILABLE
+    && (
+      candidate != null
+      || minimumShellVersion != null
+      || shellUpdateUrl != null
+    )
+  ) {
+    throw new CodexPluginProtocolError(
+      `${state} Codex plugin update check must not contain candidate update metadata`,
+    );
+  }
+  if (
+    state !== CODEX_PLUGIN_UPDATE_CHECK_STATES.UNAVAILABLE
+    && error != null
+  ) {
+    throw new CodexPluginProtocolError(
+      `${state} Codex plugin update check must not contain an error`,
+    );
+  }
+  return {
+    ...(active == null ? {} : { active }),
+    ...(candidate == null ? {} : { candidate }),
+    ...(error == null ? {} : { error }),
+    ...(minimumShellVersion == null ? {} : { minimumShellVersion }),
+    schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+    ...(shellUpdateUrl == null ? {} : { shellUpdateUrl }),
+    state,
+    updatedAt: normalizeIsoDate(record.updatedAt, "update check updatedAt"),
   };
 }
 

@@ -50,6 +50,10 @@
       "types": "./dist/runtime/deck-stage-fallback.d.ts",
       "default": "./dist/runtime/deck-stage-fallback.mjs"
     },
+    "./mcp/od-catalog": {
+      "types": "./dist/mcp/od-catalog.d.ts",
+      "default": "./dist/mcp/od-catalog.mjs"
+    },
     "./design-systems/components-manifest": {
       "types": "./dist/design-systems/components-manifest.d.ts",
       "default": "./dist/design-systems/components-manifest.mjs"

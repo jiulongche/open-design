@@ -6,7 +6,16 @@ import {
   ListResourcesRequestSchema,
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
+  type CallToolResult,
+  type ReadResourceResult,
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+  OD_MCP_RESOURCE_TEMPLATES,
+  OD_MCP_STATIC_RESOURCES,
+  OD_MCP_TOOL_DEFS,
+  OD_MCP_TOOL_NAMES,
+} from "@open-design/contracts/mcp/od-catalog";
+import type { DistributionRuntimeBindingV1 } from "@open-design/distribution-proto";
 
 import {
   readCodexPluginStatus,
@@ -24,6 +33,41 @@ import {
 export const STATUS_TOOL_NAME = "get_open_design_status";
 export const ENSURE_RUNTIME_TOOL_NAME = "ensure_open_design_runtime";
 const IDENTITY_RESOURCE_URI = "od://distribution/identity";
+const PRODUCT_TOOL_NAMES = new Set(OD_MCP_TOOL_NAMES);
+
+function runtimeMcpUrl(binding: DistributionRuntimeBindingV1): string {
+  const url = new URL(binding.endpointUrl);
+  url.pathname = "/mcp";
+  url.search = "";
+  url.hash = "";
+  return url.href;
+}
+
+async function proxyRuntimeMcp<Result>(
+  binding: DistributionRuntimeBindingV1,
+  message: unknown,
+): Promise<Result> {
+  const url = runtimeMcpUrl(binding);
+  const response = await fetch(url, {
+    body: JSON.stringify(message),
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+    },
+    method: "POST",
+    signal: AbortSignal.timeout(120_000),
+  });
+  const payload = await response.json().catch(() => null) as
+    | { error?: unknown }
+    | null;
+  if (!response.ok) {
+    const detail = typeof payload?.error === "string"
+      ? payload.error
+      : `HTTP ${response.status}`;
+    throw new Error(`Open Design runtime MCP gateway failed: ${detail}`);
+  }
+  return payload as Result;
+}
 
 async function run(): Promise<void> {
   const args = process.argv.slice(2);
@@ -52,6 +96,8 @@ async function run(): Promise<void> {
         resources: {},
         tools: {},
       },
+      instructions:
+        "Open Design tools are declared by this shell and lazily acquire or attach the exact local runtime on first product tool or product resource read. Prefer get_artifact for a complete design bundle; use create_project then start_run and poll get_run for generation.",
     },
   );
 
@@ -91,6 +137,7 @@ async function run(): Promise<void> {
         name: ENSURE_RUNTIME_TOOL_NAME,
         title: "Ensure Open Design runtime",
       },
+      ...OD_MCP_TOOL_DEFS,
     ],
   }));
 
@@ -102,26 +149,36 @@ async function run(): Promise<void> {
         name: "Open Design distribution identity",
         uri: IDENTITY_RESOURCE_URI,
       },
+      ...OD_MCP_STATIC_RESOURCES,
     ],
   }));
 
   server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
-    resourceTemplates: [],
+    resourceTemplates: OD_MCP_RESOURCE_TEMPLATES,
   }));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-    if (request.params.uri !== IDENTITY_RESOURCE_URI) {
-      throw new Error(`unsupported resource URI: ${request.params.uri}`);
+    if (request.params.uri === IDENTITY_RESOURCE_URI) {
+      return {
+        contents: [
+          {
+            mimeType: "application/json",
+            text: JSON.stringify(identity, null, 2),
+            uri: IDENTITY_RESOURCE_URI,
+          },
+        ],
+      };
     }
-    return {
-      contents: [
-        {
-          mimeType: "application/json",
-          text: JSON.stringify(identity, null, 2),
-          uri: IDENTITY_RESOURCE_URI,
-        },
-      ],
-    };
+    if (runtimeLauncher == null) {
+      throw new Error(
+        "Open Design runtime handoff requires both a configured distribution channel root and runtime manifest URL",
+      );
+    }
+    const result = await runtimeLauncher.ensureRuntime();
+    return await proxyRuntimeMcp<ReadResourceResult>(result.binding, {
+      method: "resources/read",
+      params: { uri: request.params.uri },
+    });
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -146,23 +203,39 @@ async function run(): Promise<void> {
         structuredContent,
       };
     }
-    if (request.params.name !== STATUS_TOOL_NAME) {
+    if (request.params.name === STATUS_TOOL_NAME) {
+      const status = await readCodexPluginStatus({
+        fixtureReportUrl,
+        identity,
+        suite,
+        updateCheck: await runtimeLauncher?.readUpdateStatus() ?? null,
+      });
+      return {
+        content: [
+          {
+            text: JSON.stringify(status, null, 2),
+            type: "text",
+          },
+        ],
+        structuredContent: status,
+      };
+    }
+    if (!PRODUCT_TOOL_NAMES.has(request.params.name)) {
       throw new Error(`unsupported tool: ${request.params.name}`);
     }
-    const status = await readCodexPluginStatus({
-      fixtureReportUrl,
-      identity,
-      suite,
+    if (runtimeLauncher == null) {
+      throw new Error(
+        "Open Design runtime handoff requires both a configured distribution channel root and runtime manifest URL",
+      );
+    }
+    const result = await runtimeLauncher.ensureRuntime();
+    return await proxyRuntimeMcp<CallToolResult>(result.binding, {
+      method: "tools/call",
+      params: {
+        arguments: request.params.arguments ?? {},
+        name: request.params.name,
+      },
     });
-    return {
-      content: [
-        {
-          text: JSON.stringify(status, null, 2),
-          type: "text",
-        },
-      ],
-      structuredContent: status,
-    };
   });
 
   const transport = new StdioServerTransport();

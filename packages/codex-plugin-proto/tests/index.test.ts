@@ -7,6 +7,7 @@ import {
   CODEX_PLUGIN_PLATFORM_TARGETS,
   CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
   CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
+  CODEX_PLUGIN_UPDATE_CHECK_STATES,
   CodexPluginProtocolError,
   assertCodexPluginHandoffTransition,
   compareCodexPluginShellVersions,
@@ -15,6 +16,7 @@ import {
   parseCodexPluginFixtureReport,
   parseCodexPluginHandoffDescriptor,
   parseCodexPluginRuntimeReady,
+  parseCodexPluginUpdateCheck,
   resolveCodexPluginReleasePaths,
   resolveCodexPluginShellPaths,
   resolveCodexPluginSuitePaths,
@@ -88,6 +90,9 @@ describe("@open-design/codex-plugin-proto", () => {
     expect(paths.handoffsRoot).toBe(
       join(paths.shellRoot, "state", "handoffs"),
     );
+    expect(paths.updateCheckPath).toBe(
+      join(paths.shellRoot, "state", "update-check.json"),
+    );
     expect(paths.logsRoot).toBe(join(paths.shellRoot, "logs"));
     expect(pluginSuite.dataRoot).toBe(suite.dataRoot);
     expect(pluginSuite.cacheRoot).toBe(join(paths.shellRoot, "cache"));
@@ -140,6 +145,56 @@ describe("@open-design/codex-plugin-proto", () => {
         },
       },
     });
+  });
+
+  it("validates persisted availability-first update states", () => {
+    const active = {
+      channel: "beta",
+      namespace: "release-beta",
+      protocolVersion: 1,
+      runtimeDigest: RUNTIME_DIGEST,
+      runtimeVersion: "1.2.3-beta.4",
+    };
+    expect(parseCodexPluginUpdateCheck({
+      active,
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+      state: CODEX_PLUGIN_UPDATE_CHECK_STATES.DEFERRED,
+      updatedAt: "2026-07-29T12:00:00.000Z",
+    })).toMatchObject({
+      active,
+      state: "deferred",
+    });
+    expect(parseCodexPluginUpdateCheck({
+      active,
+      candidate: {
+        ...active,
+        runtimeDigest: `sha256:${"c".repeat(64)}`,
+        runtimeVersion: "1.2.4-beta.5",
+      },
+      minimumShellVersion: "0.2.0",
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+      shellUpdateUrl: "https://updates.example.com/codex-plugin",
+      state: CODEX_PLUGIN_UPDATE_CHECK_STATES.AVAILABLE,
+      updatedAt: "2026-07-29T12:00:01.000Z",
+    })).toMatchObject({
+      minimumShellVersion: "0.2.0",
+      shellUpdateUrl: "https://updates.example.com/codex-plugin",
+      state: "available",
+    });
+    expect(parseCodexPluginUpdateCheck({
+      error: {
+        code: "RUNTIME_HTTP_FAILED",
+        message: "offline",
+      },
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+      state: CODEX_PLUGIN_UPDATE_CHECK_STATES.UNAVAILABLE,
+      updatedAt: "2026-07-29T12:00:02.000Z",
+    }).state).toBe("unavailable");
+    expect(() => parseCodexPluginUpdateCheck({
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+      state: CODEX_PLUGIN_UPDATE_CHECK_STATES.AVAILABLE,
+      updatedAt: "2026-07-29T12:00:03.000Z",
+    })).toThrow("requires a candidate runtime and minimum shell version");
   });
 
   it("validates handoff state-specific runtime bindings", () => {

@@ -113,6 +113,121 @@ function readString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function readNullableString(value) {
+  return typeof value === 'string' || value === null ? value : null;
+}
+
+function isPersistedRunId(value) {
+  return (
+    typeof value === 'string'
+    && value.length > 0
+    && value !== '.'
+    && value !== '..'
+    && path.basename(value) === value
+  );
+}
+
+function readPersistedRunEvents(eventsLogPath) {
+  try {
+    return fs.readFileSync(eventsLogPath, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          const record = JSON.parse(line);
+          return (
+            record
+            && typeof record === 'object'
+            && Number.isFinite(record.id)
+            && typeof record.event === 'string'
+          )
+            ? [record]
+            : [];
+        } catch {
+          return [];
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+function readPersistedTerminalRun(runsLogDir, id) {
+  if (!runsLogDir || !isPersistedRunId(id)) return null;
+  const runDir = path.join(runsLogDir, id);
+  const statePath = path.join(runDir, 'state.json');
+  const eventsLogPath = path.join(runDir, 'events.jsonl');
+  try {
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    if (
+      !state
+      || typeof state !== 'object'
+      || state.schemaVersion !== RUN_STATE_SCHEMA_VERSION
+      || state.id !== id
+      || !TERMINAL_RUN_STATUSES.has(state.status)
+      || !Number.isFinite(state.createdAt)
+      || !Number.isFinite(state.updatedAt)
+    ) {
+      return null;
+    }
+    const events = readPersistedRunEvents(eventsLogPath);
+    return {
+      id,
+      projectId: readNullableString(state.projectId),
+      conversationId: readNullableString(state.conversationId),
+      assistantMessageId: readNullableString(state.assistantMessageId),
+      agentId: readNullableString(state.agentId),
+      status: state.status,
+      createdAt: state.createdAt,
+      updatedAt: state.updatedAt,
+      cancelRequested: false,
+      exitCode: typeof state.exitCode === 'number' || state.exitCode === null
+        ? state.exitCode
+        : null,
+      signal: readNullableString(state.signal),
+      error: readNullableString(state.error),
+      errorCode: readNullableString(state.errorCode),
+      endedWithUnfinishedWork: state.endedWithUnfinishedWork === true,
+      artifactCount: Number.isFinite(state.artifactCount) ? state.artifactCount : undefined,
+      ...(typeof state.model === 'string' ? { model: state.model } : {}),
+      ...(typeof state.resolvedModelId === 'string'
+        ? { resolvedModelId: state.resolvedModelId }
+        : {}),
+      ...(typeof state.preflightAgentCliVersion === 'string'
+        ? { preflightAgentCliVersion: state.preflightAgentCliVersion }
+        : {}),
+      ...(typeof state.designSystemId === 'string'
+        ? { designSystemId: state.designSystemId }
+        : {}),
+      ...(typeof state.designSystemDigest === 'string'
+        ? { designSystemDigest: state.designSystemDigest }
+        : {}),
+      ...(typeof state.designSystemSelectionSource === 'string'
+        ? { designSystemSelectionSource: state.designSystemSelectionSource }
+        : {}),
+      ...(state.promptCache && typeof state.promptCache === 'object'
+        ? { promptCache: state.promptCache }
+        : {}),
+      events,
+      nextEventId: events.reduce((next, record) => Math.max(next, record.id + 1), 1),
+      clients: new Set(),
+      waiters: new Set(),
+      child: null,
+      childPid: null,
+      processGroupId: null,
+      childExitObservedAt: null,
+      projectMetadata: null,
+      eventsLogPath,
+      statePath,
+      eventsLogStream: null,
+      eventsLogClosed: true,
+      persistedTerminal: true,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function extractErrorDetails(data) {
   const payload = data && typeof data === 'object' ? data : {};
   const nested = payload.error && typeof payload.error === 'object' ? payload.error : {};
@@ -473,6 +588,7 @@ export function createChatRunService({
     persistState(run);
   };
 
+  const getPersistedTerminal = (id) => readPersistedTerminalRun(runsLogDir, id);
   const setDeliverableValidation = (run, result) => {
     if (!run || !result) return;
     run.deliverableValid = result.valid === true;
@@ -1068,6 +1184,7 @@ export function createChatRunService({
     prepareRestart,
     start,
     get,
+    getPersistedTerminal,
     findByPluginWorkflowId,
     list,
     stream,

@@ -59,6 +59,9 @@ importers:
       '@open-design/codex-plugin-proto':
         specifier: workspace:*
         version: link:../../packages/codex-plugin-proto
+      '@open-design/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@open-design/distribution-proto':
         specifier: workspace:*
         version: link:../../packages/distribution-proto

@@ -292,6 +292,10 @@ describe("tools-pack codex-plugin", () => {
     expect(source).toContain("\"--headless\",");
     expect(source).toContain("OD_RESOURCE_ROOT");
     expect(source).toContain("/api/ready");
+    expect(source).toContain("@open-design\", \"daemon\", \"dist\", \"mcp.js");
+    expect(source).toContain('requestUrl.pathname !== "/mcp"');
+    expect(source).toContain('message.method === "tools/call"');
+    expect(source).toContain('message.method === "resources/read"');
     expect(source).not.toContain("packedRuntimeVersion");
   });
 });

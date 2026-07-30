@@ -235,8 +235,8 @@ describe("@open-design/distribution-proto", () => {
       attempted,
       requested,
     })).toEqual({
-      reason: "requested-without-fallback",
-      selected: "requested",
+      reason: "failed-attempt-without-fallback",
+      selected: null,
     });
   });
 

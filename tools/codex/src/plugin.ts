@@ -19,6 +19,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import {
   CODEX_PLUGIN_ARGS,
   parseCodexPluginAcquisitionManifest,
+  parseCodexPluginUpdateCheck,
 } from "@open-design/codex-plugin-proto";
 import {
   assertSameDistributionIdentity,
@@ -748,14 +749,20 @@ async function probeStdio(
       || typeof runtime.structuredContent !== "object"
       || !("binding" in runtime.structuredContent)
       || !("manifest" in runtime.structuredContent)
+      || !("updateCheck" in runtime.structuredContent)
     ) {
-      throw new Error("Codex plugin runtime handoff did not return a binding");
+      throw new Error(
+        "Codex plugin runtime handoff did not return binding, manifest, and update-check evidence",
+      );
     }
     const selectedManifest = parseCodexPluginAcquisitionManifest(
       (runtime.structuredContent as { manifest: unknown }).manifest,
     );
     const selectedBinding = parseDistributionRuntimeBinding(
       (runtime.structuredContent as { binding: unknown }).binding,
+    );
+    parseCodexPluginUpdateCheck(
+      (runtime.structuredContent as { updateCheck: unknown }).updateCheck,
     );
     assertSameDistributionRuntimeIdentity(
       selectedManifest,

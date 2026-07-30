@@ -122,11 +122,11 @@ export type DistributionRuntimeTargetSelection =
       selected: "active";
     }
   | {
-      reason: "no-runtime-target";
+      reason: "failed-attempt-without-fallback" | "no-runtime-target";
       selected: null;
     }
   | {
-      reason: "requested" | "requested-without-fallback";
+      reason: "requested";
       selected: "requested";
     };
 
@@ -636,6 +636,8 @@ function sameDistributionRuntimeIdentity(
  * A confirmed active pointer is the local last-known-good runtime. A matching
  * attempt marks a requested immutable runtime that failed before confirmation,
  * so callers should keep serving active until a different release appears.
+ * Without a confirmed fallback, the same failed immutable candidate remains
+ * quarantined rather than being launched repeatedly.
  */
 export function selectDistributionRuntimeTarget(input: {
   active?: DistributionRuntimePointerV1 | null;
@@ -656,7 +658,7 @@ export function selectDistributionRuntimeTarget(input: {
     && sameDistributionRuntimeIdentity(attempted, requested)
   ) {
     return active == null
-      ? { reason: "requested-without-fallback", selected: "requested" }
+      ? { reason: "failed-attempt-without-fallback", selected: null }
       : { reason: "active-after-failed-attempt", selected: "active" };
   }
   return { reason: "requested", selected: "requested" };
