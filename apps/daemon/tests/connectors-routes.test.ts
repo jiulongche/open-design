@@ -998,7 +998,7 @@ describe('connector routes', () => {
             ok: true,
             headers: new Headers({ 'content-type': 'image/png' }),
             arrayBuffer: async () => {
-              await new Promise((resolve) => setTimeout(resolve, 2_100));
+              await new Promise((resolve) => setTimeout(resolve, 3_000));
               if (!init?.signal) throw new Error('expected fetch timeout signal');
               if (init.signal.aborted) {
                 firstBodyReadAborted = true;

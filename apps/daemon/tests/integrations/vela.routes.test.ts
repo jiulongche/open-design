@@ -1263,13 +1263,33 @@ describe('POST /api/integrations/vela/login', () => {
 
     const login = await postJson(`${baseUrl}/api/integrations/vela/login`);
     expect(login.status).toBe(202);
-    await new Promise((resolve) => setTimeout(resolve, 700));
-
-    const status = await getJson<{
-      authRoute?: string;
-      fallbackUsed?: boolean;
-      authStages?: Array<{ stage: string; result: string; route: string }>;
-    }>(`${baseUrl}/api/integrations/vela/status`);
+    const activationDeadline = Date.now() + 5_000;
+    let status: {
+      status: number;
+      body: {
+        authRoute?: string;
+        fallbackUsed?: boolean;
+        authStages?: Array<{ stage: string; result: string; route: string }>;
+      };
+    };
+    for (;;) {
+      status = await getJson<{
+        authRoute?: string;
+        fallbackUsed?: boolean;
+        authStages?: Array<{ stage: string; result: string; route: string }>;
+      }>(`${baseUrl}/api/integrations/vela/status`);
+      if (
+        status.body.authStages?.some(
+          (stage) => stage.stage === 'activation_ready' && stage.result === 'success',
+        )
+      ) {
+        break;
+      }
+      if (Date.now() >= activationDeadline) {
+        throw new Error('timed out waiting for activation_ready auth stage');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     expect(status.body).toMatchObject({
       authRoute: 'direct',
       fallbackUsed: false,
@@ -1304,7 +1324,7 @@ describe('POST /api/integrations/vela/login', () => {
       `${baseUrl}/api/integrations/vela/login/cancel`,
     );
     expect(cancel.body.canceled).toBe(true);
-    await new Promise((resolve) => setTimeout(resolve, 1_300));
+    await waitForVelaLoginIdle();
 
     const status = await getJson<{ loginInFlight: boolean }>(
       `${baseUrl}/api/integrations/vela/status`,
