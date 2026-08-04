@@ -659,14 +659,17 @@ describe('deploy file set', () => {
   it('runs in linear time on pathological unclosed url(', () => {
     const huge = '('.repeat(100_000);
     const input = `body{background:url${huge}}`;
+    // Fixed path finishes in low milliseconds; keep a sub-second ceiling so a
+    // regression that blocks the deploy event loop for multiple seconds fails
+    // this guard instead of hiding under a multi-second flake budget.
     const startExtract = Date.now();
     const refs = extractCssReferences(input);
-    expect(Date.now() - startExtract).toBeLessThan(5_000);
+    expect(Date.now() - startExtract).toBeLessThan(500);
     expect(refs).toEqual([]);
 
     const startRewrite = Date.now();
     expect(rewriteCssReferences(input, 'sub')).toBe(input);
-    expect(Date.now() - startRewrite).toBeLessThan(5_000);
+    expect(Date.now() - startRewrite).toBeLessThan(500);
   });
 });
 
