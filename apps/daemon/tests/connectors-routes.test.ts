@@ -998,7 +998,8 @@ describe('connector routes', () => {
             ok: true,
             headers: new Headers({ 'content-type': 'image/png' }),
             arrayBuffer: async () => {
-              if (!init?.signal) throw new Error('expected fetch timeout signal');
+              const signal = init?.signal;
+              if (!signal) throw new Error('expected fetch timeout signal');
               // Reject as soon as the route's AbortSignal fires (2s production
               // timeout) instead of sleeping past it with a fixed wall clock.
               // That preserves the cancellation assertion without adding a
@@ -1006,13 +1007,13 @@ describe('connector routes', () => {
               await new Promise<never>((_, reject) => {
                 const abort = () => {
                   firstBodyReadAborted = true;
-                  reject(init.signal?.reason ?? new DOMException('Aborted', 'AbortError'));
+                  reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
                 };
-                if (init.signal.aborted) {
+                if (signal.aborted) {
                   abort();
                   return;
                 }
-                init.signal.addEventListener('abort', abort, { once: true });
+                signal.addEventListener('abort', abort, { once: true });
               });
             },
           } as unknown as Response;
