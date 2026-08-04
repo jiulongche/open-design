@@ -30,6 +30,7 @@ import { readAppConfig, writeAppConfig } from '../../src/app-config.js';
 import {
   clearAllVelaLiveAccounts,
   clearVelaLiveAccountRefreshThrottle,
+  isVelaLoginSupervisorSettled,
   parseAmrEntryAnalyticsPayload,
   parseAmrOnboardingProfileAnalyticsPayload,
   readVelaCredentialRevision,
@@ -100,6 +101,21 @@ async function waitForVelaLoginIdle(timeoutMs = 10_000): Promise<void> {
       throw new Error('timed out waiting for vela login subprocess to become idle');
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+// Wait for the close/error terminal handler (and any late proxy fallback it
+// starts), not the public loginInFlight projection. Status can report idle
+// between the child's exit and close once exitCode is set — especially after
+// cancel, which suppresses the fallbackPending bridge that covers that gap.
+async function waitForVelaLoginSupervisorSettled(timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (isVelaLoginSupervisorSettled()) return;
+    if (Date.now() >= deadline) {
+      throw new Error('timed out waiting for vela login supervisor to settle');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
 
@@ -1324,7 +1340,10 @@ describe('POST /api/integrations/vela/login', () => {
       `${baseUrl}/api/integrations/vela/login/cancel`,
     );
     expect(cancel.body.canceled).toBe(true);
-    await waitForVelaLoginIdle();
+    // Must wait for close-deferred terminal handling, not loginInFlight=false:
+    // idle can land between exit and close while the late-fallback guard still
+    // has not run.
+    await waitForVelaLoginSupervisorSettled();
 
     const status = await getJson<{ loginInFlight: boolean }>(
       `${baseUrl}/api/integrations/vela/status`,
