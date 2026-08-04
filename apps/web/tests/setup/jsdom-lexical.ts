@@ -5,13 +5,7 @@ import { afterEach } from 'vitest';
 // them without importing jest-dom in every test file.
 import '@testing-library/jest-dom/vitest';
 
-import { configure } from '@testing-library/react';
-
 import { resetPluginsCache } from '../../src/state/projects';
-
-// Failure budget, not expected duration — see docs/testing/test-efficiency.zh-CN.md.
-// Default waitFor (1000ms) flakes at 1015–1093ms under CI CPU contention.
-configure({ asyncUtilTimeout: 5000 });
 
 // The visible-plugins cache is module-level so it survives Home remounts in the
 // app (a deliberate perf choice). In tests that persistence would leak a case's

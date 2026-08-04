@@ -237,12 +237,23 @@ const baseConfig: AppConfig = {
   agentCliEnv: {},
 };
 
+// Failure budget for first-run privacy waits under CI CPU contention.
+// Default Testing Library async timeout (1000ms) flaked at 1015–1093ms on the
+// post-click syncConfigToDaemon assertion; keep the raise scoped to these cases.
+const PRIVACY_ASYNC_TIMEOUT_MS = 2_000;
+
 async function clickCurrentPrivacyChoice(name: string) {
   // App bootstrap can rerender the banner while the async findByRole call is
   // resolving. Re-query synchronously before dispatching the event so the
   // click lands on the currently mounted button.
-  await screen.findByRole('button', { name });
+  await screen.findByRole('button', { name }, { timeout: PRIVACY_ASYNC_TIMEOUT_MS });
   fireEvent.click(screen.getByRole('button', { name }));
+}
+
+async function waitForPrivacySync(
+  assertion: () => void,
+): Promise<void> {
+  await waitFor(assertion, { timeout: PRIVACY_ASYNC_TIMEOUT_MS });
 }
 
 describe('App connectors settings flows', () => {
@@ -404,13 +415,13 @@ describe('App connectors settings flows', () => {
   it('keeps telemetry and content sharing enabled when the first-run banner share choice is clicked', async () => {
     render(<App />);
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalled();
     });
     mockedSyncConfigToDaemon.mockClear();
     await clickCurrentPrivacyChoice('Share');
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalledWith(
         expect.objectContaining({
           installationId: expect.any(String),
@@ -432,13 +443,13 @@ describe('App connectors settings flows', () => {
 
     render(<App />);
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalled();
     });
     mockedSyncConfigToDaemon.mockClear();
     await clickCurrentPrivacyChoice('Share');
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalledWith(
         expect.objectContaining({
           installationId: 'inst-existing',
@@ -460,13 +471,13 @@ describe('App connectors settings flows', () => {
 
     render(<App />);
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalled();
     });
     mockedSyncConfigToDaemon.mockClear();
     await clickCurrentPrivacyChoice('Share');
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalledWith(
         expect.objectContaining({
           installationId: 'inst-existing',
@@ -481,13 +492,13 @@ describe('App connectors settings flows', () => {
   it('turns telemetry off when the first-run banner decline choice is clicked', async () => {
     render(<App />);
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalled();
     });
     mockedSyncConfigToDaemon.mockClear();
     await clickCurrentPrivacyChoice("Don't share");
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalledWith(
         expect.objectContaining({
           installationId: null,
@@ -508,13 +519,13 @@ describe('App connectors settings flows', () => {
 
     render(<App />);
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalled();
     });
     mockedSyncConfigToDaemon.mockClear();
     await clickCurrentPrivacyChoice("Don't share");
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalledWith(
         expect.objectContaining({
           installationId: null,
@@ -562,7 +573,7 @@ describe('App connectors settings flows', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit settings draft' }));
     fireEvent.click(screen.getByRole('button', { name: 'Share' }));
 
-    await waitFor(() => {
+    await waitForPrivacySync(() => {
       expect(mockedSyncConfigToDaemon).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'claude-draft-before-autosave',

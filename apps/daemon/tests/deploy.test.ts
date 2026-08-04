@@ -799,11 +799,11 @@ describe('deploy plan and analyzer', () => {
     // Correctness is preserved (no doctype -> still flagged) and the check is
     // linear: the tempered regex handles this in well under 1ms, whereas the
     // old lazy-body regex grew ~2x per added comment (seconds here, minutes
-    // with a few more). The 5_000ms budget sits far above the fixed path yet
-    // well below the vulnerable exponential time, so any regression still
-    // blows it — while absorbing 5s-class CI runner slowness.
+    // with a few more). The 500ms budget sits far above the fixed path (~100x
+    // headroom, no false failures) yet well below the vulnerable time (~5s on
+    // Node 24 for this fixture), so any regression blows it.
     expect(warnings.map((w) => w.code)).toContain('no-doctype');
-    expect(elapsedMs).toBeLessThan(5_000);
+    expect(elapsedMs).toBeLessThan(500);
   });
 
   it('flags external scripts and stylesheets', () => {
