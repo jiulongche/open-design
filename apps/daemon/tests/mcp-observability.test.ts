@@ -87,6 +87,128 @@ describe('local MCP plugin observability contract', () => {
     })).toThrow(/PLUGIN_CONTRACT_REJECTED/u);
   });
 
+  it('binds protocol-v2 gateway calls to the verified shell identity', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/analytics/mcp/context')) {
+        return new Response(JSON.stringify({
+          deviceId: null,
+          enabled: false,
+          locale: 'en',
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const gateway = await createMcpGatewaySession({
+      baseUrl: 'http://127.0.0.1:17456',
+      clientInfo: { name: 'codex', version: '1.0.0' },
+      externalPluginContext: pluginContext,
+    });
+    const collected = await gateway.call('collect_brief', {
+      artifactType: 'website',
+      skip: true,
+    });
+    expect(collected.structuredContent).toMatchObject({
+      externalPluginContext: pluginContext,
+      pluginWorkflowId: expect.any(String),
+    });
+    await expect(gateway.call('collect_brief', {
+      artifactType: 'website',
+      externalPluginContext: { ...pluginContext, version: '0.6.0' },
+      skip: true,
+    })).rejects.toThrow('conflicts with the verified plugin shell identity');
+  });
+
+  it('continues a confirmed plugin workflow in a later protocol-v2 gateway session', async () => {
+    const workflowLookups: string[] = [];
+    const runBodies: Record<string, unknown>[] = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/analytics/mcp/context')) {
+        return new Response(JSON.stringify({
+          deviceId: null,
+          enabled: false,
+          locale: 'en',
+        }), { status: 200 });
+      }
+      if (url.includes('/api/runs/by-plugin-workflow/')) {
+        workflowLookups.push(url);
+        return new Response(JSON.stringify({
+          error: {
+            code: 'NOT_FOUND',
+            message: 'plugin workflow run not found',
+          },
+        }), { status: 404 });
+      }
+      if (url.endsWith('/api/projects')) {
+        return new Response(JSON.stringify({
+          projects: [{ id: 'project-1', name: 'Demo' }],
+        }), { status: 200 });
+      }
+      if (url.endsWith('/api/runs')) {
+        runBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return new Response(JSON.stringify({
+          runId: 'run-1',
+          conversationId: 'conversation-1',
+        }), { status: 202 });
+      }
+      if (url.endsWith('/api/mcp/install-info')) {
+        return new Response(JSON.stringify({ webBaseUrl: null }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const firstGateway = await createMcpGatewaySession({
+      baseUrl: 'http://127.0.0.1:17456',
+      clientInfo: { name: 'codex', version: '1.0.0' },
+      externalPluginContext: pluginContext,
+    });
+    const collected = await firstGateway.call('collect_brief', {
+      artifactType: 'website',
+    });
+    const brief = collected.structuredContent as {
+      briefDraftId: string;
+      nonce: string;
+      pluginWorkflowId: string;
+      questionForm: {
+        questions: Array<{ id: string; defaultValue: string }>;
+      };
+    };
+    const answers = Object.fromEntries(
+      brief.questionForm.questions.map((question) => [
+        question.id,
+        [question.defaultValue],
+      ]),
+    );
+    await firstGateway.call('confirm_brief', {
+      briefDraftId: brief.briefDraftId,
+      nonce: brief.nonce,
+      answers,
+    });
+
+    const laterGateway = await createMcpGatewaySession({
+      baseUrl: 'http://127.0.0.1:17456',
+      clientInfo: { name: 'codex', version: '1.0.0' },
+      externalPluginContext: pluginContext,
+    });
+    const started = await laterGateway.call('start_run', {
+      project: 'project-1',
+      prompt: 'Create a launch page',
+      requestId: '018f6f2e-5555-7555-8555-555555555555',
+      pluginWorkflowId: brief.pluginWorkflowId,
+    });
+
+    expect(started).not.toHaveProperty('isError');
+    expect(workflowLookups).toEqual([]);
+    expect(runBodies).toHaveLength(1);
+    expect(runBodies[0]?.analyticsHints).toMatchObject({
+      briefState: 'confirmed',
+      pluginWorkflowId: brief.pluginWorkflowId,
+    });
+  });
+
   it('keeps Codex host variants bounded until a real host smoke proves a stable split', () => {
     expect(mapMcpHostProduct({ name: 'codex', version: '1.2.3' })).toBe(
       'codex_unknown',
@@ -300,6 +422,44 @@ describe('local MCP plugin observability contract', () => {
     await expect(
       session.resolveAttribution('get_project', { project: 'project-1' }, store),
     ).resolves.toBeNull();
+  });
+
+  it('restores the original Brief state with an accepted workflow after runtime restart', async () => {
+    const pluginWorkflowId = '018f6f2e-7777-7777-8777-777777777777';
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/analytics/mcp/context')) {
+        return new Response(JSON.stringify({
+          enabled: false,
+          deviceId: null,
+          locale: 'en',
+        }), { status: 200 });
+      }
+      if (url.endsWith(`/api/runs/by-plugin-workflow/${pluginWorkflowId}`)) {
+        return new Response(JSON.stringify({
+          runId: 'run-restored',
+          projectId: 'project-restored',
+          pluginWorkflowId,
+          logicalRequestDigest: 'a'.repeat(64),
+          logicalRequestDigestVersion: 1,
+          externalPluginContext: pluginContext,
+          briefState: 'confirmed',
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const session = await McpObservabilitySession.create(
+      'http://127.0.0.1:17456',
+      { name: 'codex', version: '1.0.0' },
+    );
+    const attribution = await session.resolveAttribution(
+      'start_run',
+      { pluginWorkflowId },
+      createLocalMcpBriefStore(),
+    );
+
+    expect(attribution).toEqual({ context: pluginContext, pluginWorkflowId });
+    expect(session.briefStateForWorkflow(pluginWorkflowId)).toBe('confirmed');
   });
 
   it('keeps MCP transport failures and delivery completeness as separate facts', () => {

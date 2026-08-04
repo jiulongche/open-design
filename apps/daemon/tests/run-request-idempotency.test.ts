@@ -207,6 +207,7 @@ describe('run request idempotency', () => {
       projectId: request.projectId,
       pluginWorkflowId,
       logicalRequestDigest: logical.digest,
+      briefState: 'not_applicable',
       externalPluginContext: {
         id: 'open-design',
         version: '0.4.0',
@@ -226,6 +227,7 @@ describe('run request idempotency', () => {
       projectId: request.projectId,
       pluginWorkflowId,
       logicalRequestDigest: logical.digest,
+      briefState: 'not_applicable',
     });
 
     const conflictingRequestId = randomUUID();

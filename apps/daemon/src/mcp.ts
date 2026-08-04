@@ -1060,7 +1060,22 @@ interface PersistedPluginWorkflowBinding {
   logicalRequestDigest: string;
   logicalRequestDigestVersion: 1;
   externalPluginContext: ExternalPluginContext;
+  briefState: McpPluginBriefState;
 }
+
+type McpPluginBriefState = 'confirmed' | 'skipped' | 'not_applicable';
+
+interface McpPluginWorkflowState {
+  context: ExternalPluginContext;
+  briefState: McpPluginBriefState;
+}
+
+// Protocol-v2 sessions are transport sessions, not workflow boundaries. Codex
+// may close one plugin MCP session after confirming a Brief and open another
+// before create_project/start_run. Keep pre-run attribution at runtime scope so
+// that handoff stays verified without requiring a Run to exist first.
+const protocolV2PluginWorkflows =
+  new BoundedLruMap<string, McpPluginWorkflowState>(2_048);
 
 function issuePluginWorkflowId(callerValue: unknown): string {
   if (callerValue !== undefined) {
@@ -1071,10 +1086,15 @@ function issuePluginWorkflowId(callerValue: unknown): string {
   return randomUUID();
 }
 
+function isMcpPluginBriefState(value: unknown): value is McpPluginBriefState {
+  return value === 'confirmed'
+    || value === 'skipped'
+    || value === 'not_applicable';
+}
+
 export class McpObservabilitySession {
   readonly id = randomUUID();
   readonly hostProduct;
-  private readonly workflows = new BoundedLruMap<string, ExternalPluginContext>(2_048);
   private readonly runWorkflows = new BoundedLruMap<string, string>(2_048);
   private readonly workflowRuns = new BoundedLruMap<string, string>(2_048);
   private readonly workflowProjects = new BoundedLruMap<string, string>(2_048);
@@ -1085,6 +1105,7 @@ export class McpObservabilitySession {
     private baseUrl: string,
     private readonly identity: McpAnalyticsContextResponse,
     clientInfo: { name?: unknown; version?: unknown } | null | undefined,
+    private readonly workflows: BoundedLruMap<string, McpPluginWorkflowState>,
   ) {
     this.hostProduct = mapMcpHostProduct(clientInfo);
   }
@@ -1096,6 +1117,7 @@ export class McpObservabilitySession {
   static async create(
     baseUrl: string,
     clientInfo: { name?: unknown; version?: unknown } | null | undefined,
+    workflows = new BoundedLruMap<string, McpPluginWorkflowState>(2_048),
   ): Promise<McpObservabilitySession> {
     let identity: McpAnalyticsContextResponse = {
       enabled: false,
@@ -1110,7 +1132,12 @@ export class McpObservabilitySession {
     } catch {
       // A telemetry bootstrap failure must not block the MCP server.
     }
-    const session = new McpObservabilitySession(baseUrl, identity, clientInfo);
+    const session = new McpObservabilitySession(
+      baseUrl,
+      identity,
+      clientInfo,
+      workflows,
+    );
     await session.emit('mcp_session_initialized', null, {
       mcp_session_id: session.id,
       host_product: session.hostProduct,
@@ -1134,6 +1161,7 @@ export class McpObservabilitySession {
       )
       || binding.logicalRequestDigestVersion !== 1
       || !/^[0-9a-f]{64}$/u.test(binding.logicalRequestDigest)
+      || !isMcpPluginBriefState(binding.briefState)
     ) {
       throw pluginContractError(
         'persisted plugin workflow binding is invalid',
@@ -1142,7 +1170,10 @@ export class McpObservabilitySession {
     const context = validateExternalPluginContext(
       binding.externalPluginContext,
     );
-    this.workflows.set(pluginWorkflowId, context);
+    this.workflows.set(pluginWorkflowId, {
+      context,
+      briefState: binding.briefState,
+    });
     this.rememberRun(
       binding.runId,
       binding.projectId ?? undefined,
@@ -1166,17 +1197,22 @@ export class McpObservabilitySession {
       );
       const pluginWorkflowId = issuePluginWorkflowId(args.pluginWorkflowId);
       args.pluginWorkflowId = pluginWorkflowId;
-      this.workflows.set(pluginWorkflowId, context);
+      this.workflows.set(pluginWorkflowId, {
+        context,
+        briefState: args.skip === true ? 'skipped' : 'not_applicable',
+      });
       return { context, pluginWorkflowId };
     }
 
     if (name === 'confirm_brief') {
       const inherited = briefStore.attributionForDraft(args.briefDraftId);
       if (inherited) {
-        this.workflows.set(
-          inherited.pluginWorkflowId,
-          inherited.externalPluginContext,
-        );
+        this.workflows.set(inherited.pluginWorkflowId, {
+          context: inherited.externalPluginContext,
+          briefState: briefStore.briefStateForWorkflow(
+            inherited.pluginWorkflowId,
+          ),
+        });
         return {
           context: inherited.externalPluginContext,
           pluginWorkflowId: inherited.pluginWorkflowId,
@@ -1188,29 +1224,43 @@ export class McpObservabilitySession {
       const pluginWorkflowId = validatePluginWorkflowId(
         args.pluginWorkflowId,
       );
-      let context = this.workflows.get(pluginWorkflowId);
-      if (!context) {
+      let workflow = this.workflows.get(pluginWorkflowId);
+      if (!workflow) {
         await this.restoreAcceptedWorkflow(pluginWorkflowId);
-        context = this.workflows.get(pluginWorkflowId);
+        workflow = this.workflows.get(pluginWorkflowId);
       }
-      if (!context) {
+      if (!workflow) {
         throw pluginContractError(
           'pluginWorkflowId is unknown in this MCP session',
         );
       }
-      return { context, pluginWorkflowId };
+      return { context: workflow.context, pluginWorkflowId };
     }
 
     if (name === 'get_run' && typeof args.runId === 'string') {
       const pluginWorkflowId = this.runWorkflows.get(args.runId);
-      const context = pluginWorkflowId
+      const workflow = pluginWorkflowId
         ? this.workflows.get(pluginWorkflowId)
         : undefined;
-      if (pluginWorkflowId && context) {
-        return { context, pluginWorkflowId };
+      if (pluginWorkflowId && workflow) {
+        return { context: workflow.context, pluginWorkflowId };
       }
     }
     return null;
+  }
+
+  rememberBriefState(
+    attribution: McpPluginAttribution,
+    briefState: McpPluginBriefState,
+  ): void {
+    this.workflows.set(attribution.pluginWorkflowId, {
+      context: attribution.context,
+      briefState,
+    });
+  }
+
+  briefStateForWorkflow(pluginWorkflowId: string): McpPluginBriefState {
+    return this.workflows.get(pluginWorkflowId)?.briefState ?? 'not_applicable';
   }
 
   beginCall(
@@ -1557,13 +1607,23 @@ async function observeMcpToolCall(
       pluginAttribution: attribution,
       ...(attribution
         ? {
-            briefState: briefStore.briefStateForWorkflow(
+            briefState: session.briefStateForWorkflow(
               attribution.pluginWorkflowId,
             ),
           }
         : {}),
     });
   });
+  if (
+    attribution
+    && result.isError !== true
+    && (name === 'collect_brief' || name === 'confirm_brief')
+  ) {
+    session.rememberBriefState(
+      attribution,
+      briefStore.briefStateForWorkflow(attribution.pluginWorkflowId),
+    );
+  }
   const payload = parseMcpResult(result);
   if (
     name === 'start_run'
@@ -1707,6 +1767,50 @@ function mcpDeliveryFacts(
           user_action: 'retry',
         }
       : {}),
+  };
+}
+
+export async function createMcpGatewaySession(options: {
+  baseUrl: string;
+  clientInfo: { name?: unknown; version?: unknown };
+  externalPluginContext: ExternalPluginContext;
+}) {
+  const baseUrl = options.baseUrl.replace(/\/$/, '');
+  const daemonTarget = createMcpDaemonTarget({ daemonUrl: baseUrl });
+  const briefStore = createLocalMcpBriefStore();
+  const observability = await McpObservabilitySession.create(
+    baseUrl,
+    options.clientInfo,
+    protocolV2PluginWorkflows,
+  );
+  const verifiedContext = validateExternalPluginContext(
+    options.externalPluginContext,
+  );
+  return {
+    async call(name: unknown, input: unknown): Promise<McpToolCallResult> {
+      const args: McpArgs = input && typeof input === 'object' && !Array.isArray(input)
+        ? { ...(input as McpArgs) }
+        : {};
+      if (name === 'collect_brief') {
+        if (
+          args.externalPluginContext !== undefined
+          && JSON.stringify(validateExternalPluginContext(args.externalPluginContext))
+            !== JSON.stringify(verifiedContext)
+        ) {
+          throw pluginContractError(
+            'externalPluginContext conflicts with the verified plugin shell identity',
+          );
+        }
+        args.externalPluginContext = verifiedContext;
+      }
+      return observeMcpToolCall(
+        observability,
+        briefStore,
+        daemonTarget,
+        name,
+        args,
+      );
+    },
   };
 }
 
