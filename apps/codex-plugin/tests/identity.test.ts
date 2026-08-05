@@ -146,6 +146,27 @@ describe("codex plugin identity", () => {
     });
   });
 
+  it("defaults formal release channels to the matching product data root", () => {
+    const homeDir = join(tmpdir(), "codex-home");
+    expect(resolveCodexPluginDistributionChannelRoot([], {}, {
+      channel: "beta",
+      homeDir,
+      platform: "darwin",
+    })).toBe(join(homeDir, "Library", "Application Support", "Open Design Beta"));
+    expect(resolveCodexPluginDistributionChannelRoot([], {
+      APPDATA: "C:\\Users\\Fred\\AppData\\Roaming",
+    }, {
+      channel: "beta",
+      homeDir: "C:\\Users\\Fred",
+      platform: "win32",
+    })).toBe("C:\\Users\\Fred\\AppData\\Roaming\\Open Design Beta");
+    expect(resolveCodexPluginDistributionChannelRoot([], {}, {
+      channel: "custom",
+      homeDir,
+      platform: "darwin",
+    })).toBeNull();
+  });
+
   it("lets a controlled local environment override the baked release manifest", () => {
     expect(resolveCodexPluginRuntimeManifestUrl(
       ["--runtime-manifest-url", "http://127.0.0.1:17456/manifest.json"],

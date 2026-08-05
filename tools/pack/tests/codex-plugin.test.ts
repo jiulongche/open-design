@@ -233,7 +233,7 @@ describe("tools-pack codex-plugin", () => {
       "--identity-file",
       "./distribution.json",
       "--runtime-manifest-url",
-      `https://releases.open-design.ai/codex-plugin/beta/smoke/${target}/latest/runtime.json`,
+      `https://releases.open-design.ai/beta/closure/${target}/latest/runtime.json`,
     ]);
     expect(mcpConfig.mcpServers?.["open-design"]?.env_vars).toEqual([
       "OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL",

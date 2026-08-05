@@ -370,7 +370,11 @@ export function resolveCodexPluginReleasePaths(options: {
     channel,
   );
   const mediaType = normalizeRuntimeMediaType(options.mediaType);
-  const root = `codex-plugin/${channel}/${namespace}/${platform}`;
+  // Public runtime closure is a product-level feed. The Codex plugin is one
+  // adapter that consumes it; its namespace remains part of the signed
+  // manifest identity and local isolation, not the public object key.
+  void namespace;
+  const root = `${channel}/closure/${platform}`;
   const artifactName =
     mediaType === CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1
       ? "runtime.zip"

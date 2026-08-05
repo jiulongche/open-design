@@ -1,4 +1,5 @@
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { join, win32 } from "node:path";
 
 import {
   normalizeDistributionAbsolutePath,
@@ -11,6 +12,10 @@ import {
   CODEX_PLUGIN_ENV,
   resolveCodexPluginSuitePaths,
 } from "@open-design/codex-plugin-proto";
+import {
+  isReleaseChannel,
+  releaseInstallIdentity,
+} from "@open-design/release";
 
 export type CodexPluginSuiteObservation =
   | {
@@ -30,15 +35,37 @@ function valueAfterArg(args: readonly string[], name: string): string | null {
 export function resolveCodexPluginDistributionChannelRoot(
   args: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
+  defaults: {
+    channel?: unknown;
+    homeDir?: string;
+    platform?: NodeJS.Platform;
+  } = {},
 ): string | null {
   const value = valueAfterArg(args, CODEX_PLUGIN_ARGS.DISTRIBUTION_CHANNEL_ROOT)
     ?? env[CODEX_PLUGIN_ENV.DISTRIBUTION_CHANNEL_ROOT]
     ?? null;
-  if (value == null || value.trim().length === 0) return null;
-  return normalizeDistributionAbsolutePath(
-    value.trim(),
-    "distribution channel root",
-  );
+  if (value != null && value.trim().length > 0) {
+    return normalizeDistributionAbsolutePath(
+      value.trim(),
+      "distribution channel root",
+    );
+  }
+  if (!isReleaseChannel(defaults.channel)) return null;
+  const productName = releaseInstallIdentity(defaults.channel).productName;
+  const platform = defaults.platform ?? process.platform;
+  const home = defaults.homeDir ?? homedir();
+  if (platform === "darwin") {
+    return join(home, "Library", "Application Support", productName);
+  }
+  if (platform === "win32") {
+    const roamingRoot = env.APPDATA?.trim() || win32.join(
+      home,
+      "AppData",
+      "Roaming",
+    );
+    return win32.join(roamingRoot, productName);
+  }
+  return null;
 }
 
 export function resolveCodexPluginRuntimeManifestUrl(
@@ -77,7 +104,10 @@ export function observeCodexPluginSuite(options: {
 }): CodexPluginSuiteObservation {
   const args = options.args ?? [];
   const env = options.env ?? process.env;
-  const channelRoot = resolveCodexPluginDistributionChannelRoot(args, env);
+  const channelRoot = resolveCodexPluginDistributionChannelRoot(args, env, {
+    channel: options.identity.channel,
+    platform: options.platform,
+  });
   if (channelRoot == null) return { configured: false };
   return {
     configured: true,

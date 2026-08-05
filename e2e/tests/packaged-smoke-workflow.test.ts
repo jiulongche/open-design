@@ -1605,6 +1605,20 @@ process.stdin.on("end", () => {
     expect(winJob).toContain("builder\\*-setup.exe");
     expect(winJob).toContain("builder\\*-portable.zip");
 
+    // The platform-native Codex output is returned as one relocatable bundle:
+    // marketplace, runtime ZIP, build report, and side-effect-free publication
+    // plan remain under the same platform root.
+    expect(macJob).toContain("name: open-design-beta-codex-darwin-arm64-acceptance");
+    expect(macJob).toContain("if: ${{ success() && !inputs.publish }}");
+    expect(macJob).toContain("namespaces/release-beta/darwin-arm64/publication-report.json");
+    expect(macJob).toContain("namespaces/release-beta/darwin-arm64\n");
+    expect(winJob).toContain("name: open-design-beta-codex-win32-x64-acceptance");
+    expect(winJob).toContain("if: ${{ success() && !inputs.publish }}");
+    expect(winJob).toContain("namespaces\\release-beta\\win32-x64\\publication-report.json");
+    expect(winJob).toContain("namespaces\\release-beta\\win32-x64\n");
+    expect(workflow).not.toContain("release-report/codex-plugin-mac-arm64.json");
+    expect(workflow).not.toContain("release-report\\codex-plugin-win-x64.json");
+
     // Every publish=false distribution step is gated on !inputs.publish, so the
     // publish=true release pipeline runs exactly as it did before.
     const dogfoodSteps = workflow.split("\n      - name: ").filter((step) =>

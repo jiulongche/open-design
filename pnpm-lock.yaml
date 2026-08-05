@@ -65,6 +65,9 @@ importers:
       '@open-design/distribution-proto':
         specifier: workspace:*
         version: link:../../packages/distribution-proto
+      '@open-design/release':
+        specifier: workspace:*
+        version: link:../../packages/release
     devDependencies:
       '@types/node':
         specifier: 24.12.2

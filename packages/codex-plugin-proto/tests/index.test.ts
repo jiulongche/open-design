@@ -326,7 +326,7 @@ describe("@open-design/codex-plugin-proto", () => {
     );
   });
 
-  it("resolves one production path family per channel, namespace, and platform", () => {
+  it("resolves one adapter-neutral closure path family per channel and platform", () => {
     expect(resolveCodexPluginReleasePaths({
       channel: "beta",
       mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1,
@@ -335,10 +335,10 @@ describe("@open-design/codex-plugin-proto", () => {
       runtimeVersion: "1.2.3-beta.4",
     })).toEqual({
       latestRuntimeManifestPath:
-        "codex-plugin/beta/release-beta/darwin-arm64/latest/runtime.json",
-      root: "codex-plugin/beta/release-beta/darwin-arm64",
+        "beta/closure/darwin-arm64/latest/runtime.json",
+      root: "beta/closure/darwin-arm64",
       runtimeArtifactPath:
-        "codex-plugin/beta/release-beta/darwin-arm64/versions/1.2.3-beta.4/runtime/runtime.zip",
+        "beta/closure/darwin-arm64/versions/1.2.3-beta.4/runtime/runtime.zip",
     });
   });
 });

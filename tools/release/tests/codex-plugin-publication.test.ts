@@ -79,12 +79,12 @@ describe("Codex plugin runtime publication", () => {
     expect(plan.artifact).toMatchObject({
       contentType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1,
       objectKey:
-        "codex-plugin/beta/release-beta/darwin-arm64/versions/0.16.1-beta.1/runtime/runtime.zip",
+        "beta/closure/darwin-arm64/versions/0.16.1-beta.1/runtime/runtime.zip",
       url:
-        "https://releases.example.com/codex-plugin/beta/release-beta/darwin-arm64/versions/0.16.1-beta.1/runtime/runtime.zip",
+        "https://releases.example.com/beta/closure/darwin-arm64/versions/0.16.1-beta.1/runtime/runtime.zip",
     });
     expect(plan.latestManifest.objectKey).toBe(
-      "codex-plugin/beta/release-beta/darwin-arm64/latest/runtime.json",
+      "beta/closure/darwin-arm64/latest/runtime.json",
     );
     expect(parseCodexPluginAcquisitionManifest(
       plan.latestManifest.manifest,

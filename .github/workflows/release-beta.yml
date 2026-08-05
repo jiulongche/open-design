@@ -696,7 +696,7 @@ jobs:
         env:
           CODEX_PLUGIN_BUILD_REPORT: ${{ runner.temp }}/codex-plugin-tools-pack/out/codex-plugin/namespaces/release-beta/darwin-arm64/build-report.json
           CODEX_PLUGIN_PLATFORM: darwin-arm64
-          CODEX_PLUGIN_PUBLICATION_REPORT: ${{ runner.temp }}/release-report/codex-plugin-mac-arm64.json
+          CODEX_PLUGIN_PUBLICATION_REPORT: ${{ runner.temp }}/codex-plugin-tools-pack/out/codex-plugin/namespaces/release-beta/darwin-arm64/publication-report.json
           RELEASE_DRY_RUN_MODE: release-beta
           RELEASE_PUBLIC_ORIGIN: ${{ inputs.release_public_origin != '' && inputs.release_public_origin || vars.CLOUDFLARE_R2_RELEASES_PUBLIC_ORIGIN }}
           RELEASE_PUBLISH_SIDE_EFFECTS: ${{ inputs.publish && 'true' || 'false' }}
@@ -710,9 +710,18 @@ jobs:
       - name: Publish Codex plugin runtime summary
         if: ${{ always() }}
         run: |
-          if [ -f "$RUNNER_TEMP/release-report/codex-plugin-mac-arm64.json.md" ]; then
-            cat "$RUNNER_TEMP/release-report/codex-plugin-mac-arm64.json.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/codex-plugin-tools-pack/out/codex-plugin/namespaces/release-beta/darwin-arm64/publication-report.json.md" ]; then
+            cat "$RUNNER_TEMP/codex-plugin-tools-pack/out/codex-plugin/namespaces/release-beta/darwin-arm64/publication-report.json.md" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Upload beta mac_arm64 Codex acceptance bundle
+        if: ${{ success() && !inputs.publish }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: open-design-beta-codex-darwin-arm64-acceptance
+          path: ${{ runner.temp }}/codex-plugin-tools-pack/out/codex-plugin/namespaces/release-beta/darwin-arm64
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Write mac_arm64 release report
         if: ${{ always() }}
@@ -1305,7 +1314,7 @@ jobs:
         env:
           CODEX_PLUGIN_BUILD_REPORT: ${{ runner.temp }}\codex-plugin-tools-pack\out\codex-plugin\namespaces\release-beta\win32-x64\build-report.json
           CODEX_PLUGIN_PLATFORM: win32-x64
-          CODEX_PLUGIN_PUBLICATION_REPORT: ${{ runner.temp }}\release-report\codex-plugin-win-x64.json
+          CODEX_PLUGIN_PUBLICATION_REPORT: ${{ runner.temp }}\codex-plugin-tools-pack\out\codex-plugin\namespaces\release-beta\win32-x64\publication-report.json
           RELEASE_DRY_RUN_MODE: release-beta
           RELEASE_PUBLIC_ORIGIN: ${{ inputs.release_public_origin != '' && inputs.release_public_origin || vars.CLOUDFLARE_R2_RELEASES_PUBLIC_ORIGIN }}
           RELEASE_PUBLISH_SIDE_EFFECTS: ${{ inputs.publish && 'true' || 'false' }}
@@ -1320,8 +1329,17 @@ jobs:
         if: ${{ always() }}
         shell: pwsh
         run: |
-          $summary = "${{ runner.temp }}\release-report\codex-plugin-win-x64.json.md"
+          $summary = "${{ runner.temp }}\codex-plugin-tools-pack\out\codex-plugin\namespaces\release-beta\win32-x64\publication-report.json.md"
           if (Test-Path -LiteralPath $summary) { Get-Content -LiteralPath $summary | Add-Content $env:GITHUB_STEP_SUMMARY }
+
+      - name: Upload beta win_x64 Codex acceptance bundle
+        if: ${{ success() && !inputs.publish }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: open-design-beta-codex-win32-x64-acceptance
+          path: ${{ runner.temp }}\codex-plugin-tools-pack\out\codex-plugin\namespaces\release-beta\win32-x64
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Write win_x64 release report
         if: ${{ always() }}

@@ -75,7 +75,7 @@ Linux carrier artifact.
 | `ODP-C01` | A healthy compatible live binding attaches without waiting for the remote manifest. Local attach target is below 500 ms. | Launcher latency test with a non-resolving manifest fetch | Required |
 | `ODP-C02` | Live attach returns update state `deferred`; the best-effort background check later persists `current`, `available`, or `unavailable`. Remote failure does not invalidate the binding. | Launcher update-status tests and persisted status snapshot | Required |
 | `ODP-C03` | With a compatible installed active runtime but no live binding, remote manifest lookup has a 500 ms maximum budget, then local startup proceeds. | Fake-clock/controlled-fetch launcher test | Required |
-| `ODP-C04` | With no compatible installed active runtime, first acquisition allows a 5 second manifest budget and returns typed `RUNTIME_UNAVAILABLE` when no candidate can be obtained. | Launcher timeout/error test | Required |
+| `ODP-C04` | With no compatible installed active runtime, first acquisition allows a 5 second manifest budget, bounds artifact download at 30 seconds, and enforces a 110 second internal end-to-end acquisition deadline below the host's 120 second tool timeout. Manifest absence returns typed `RUNTIME_UNAVAILABLE`; exhausting the total budget returns typed `RUNTIME_ACQUISITION_TIMEOUT`. | Launcher timeout/error test | Required |
 | `ODP-C05` | Runtime ready has a 45 second budget. A concurrent observer waits at least 50 seconds for the owner to publish a binding and never steals a healthy live lease. | Timeout constant assertion plus concurrent launcher test | Required |
 | `ODP-C06` | Live incompatible or live unobservable binding fails closed. No implicit takeover, cross-shell stop, or PID replacement occurs. | Launcher negative tests | Required |
 | `ODP-C07` | Corrupt active, manifest, attempt, binding, or lease state returns a stable typed launcher error and is never silently repaired or bypassed. | Corrupt-state table tests | Required |
@@ -107,7 +107,7 @@ Linux carrier artifact.
 
 | ID | Required assertion | Evidence and executor | Gate |
 | --- | --- | --- | --- |
-| `ODP-F01` | Runtime publication uses only `codex-plugin/<channel>/<namespace>/<platform>` and never the Desktop release whitelist. | Publisher plan and workflow topology tests | Required |
+| `ODP-F01` | Runtime publication uses only `<channel>/closure/<platform>`; the Codex adapter namespace remains in the manifest identity and never enters the public object key or Desktop release whitelist. | Publisher plan and workflow topology tests | Required |
 | `ODP-F02` | Runtime artifact is immutable and long-cacheable; latest manifest is short-cacheable and updated with conditional/CAS semantics. | `tools-release` publication tests and dry-run report | Required |
 | `ODP-F03` | Stable promotion reuses the exact prerelease bytes rather than rebuilding. | Release identity/digest comparison | Required for stable |
 | `ODP-F04` | Marketplace shell publication is a separate low-frequency operation. Missing public shell update URL does not block runtime beta delivery, but remains an explicit follow-up. | Release configuration review | Required declaration |

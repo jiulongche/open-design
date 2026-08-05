@@ -12,7 +12,16 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { dirname, extname, join, relative, resolve, sep, win32 } from "node:path";
+import {
+  basename,
+  dirname,
+  extname,
+  join,
+  relative,
+  resolve,
+  sep,
+  win32,
+} from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -158,6 +167,94 @@ type PluginListPayload = {
 
 async function readJson(path: string): Promise<unknown> {
   return JSON.parse(await readFile(path, "utf8")) as unknown;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  return access(path).then(() => true).catch(() => false);
+}
+
+function portablePath(root: string, target: string): string {
+  return relative(root, target).split(sep).join("/");
+}
+
+export async function loadToolCodexBuildReport(
+  path: string,
+): Promise<DistributionBuildReportV1> {
+  const buildReportPath = resolve(path);
+  const report = parseDistributionBuildReport(await readJson(buildReportPath));
+  const originalPaths = [
+    report.paths.artifactRoot,
+    report.paths.manifestPath,
+    report.paths.shellRoot,
+    ...(report.runtimeArtifact == null ? [] : [report.runtimeArtifact.path]),
+  ];
+  if ((await Promise.all(originalPaths.map(pathExists))).every(Boolean)) {
+    return report;
+  }
+  if (basename(buildReportPath) !== "build-report.json") {
+    throw new ToolCodexError(
+      "BUILD_REPORT_PATHS_UNAVAILABLE",
+      "a relocated release build report must retain the build-report.json filename",
+    );
+  }
+  const originalPlatformRoot = dirname(report.paths.artifactRoot);
+  const runtimeName = report.runtimeArtifact == null
+    ? null
+    : basename(report.runtimeArtifact.path);
+  const standardLayout =
+    basename(report.paths.artifactRoot) === "marketplace"
+    && portablePath(report.paths.artifactRoot, report.paths.shellRoot)
+      === "plugins/open-design"
+    && portablePath(report.paths.shellRoot, report.paths.manifestPath)
+      === ".codex-plugin/plugin.json"
+    && (
+      report.runtimeArtifact == null
+      || (
+        (runtimeName === "runtime.zip" || runtimeName === "runtime.mjs")
+        && portablePath(originalPlatformRoot, report.runtimeArtifact.path)
+          === `runtime/${runtimeName}`
+      )
+    );
+  if (!standardLayout) {
+    throw new ToolCodexError(
+      "BUILD_REPORT_PATHS_UNAVAILABLE",
+      "build report paths are unavailable and do not match the relocatable release bundle layout",
+    );
+  }
+  const platformRoot = dirname(buildReportPath);
+  const artifactRoot = join(platformRoot, "marketplace");
+  const shellRoot = join(artifactRoot, "plugins", "open-design");
+  const materialized = parseDistributionBuildReport({
+    ...report,
+    paths: {
+      artifactRoot,
+      manifestPath: join(shellRoot, ".codex-plugin", "plugin.json"),
+      shellRoot,
+    },
+    ...(report.runtimeArtifact == null
+      ? {}
+      : {
+          runtimeArtifact: {
+            ...report.runtimeArtifact,
+            path: join(platformRoot, "runtime", runtimeName!),
+          },
+        }),
+  });
+  const materializedPaths = [
+    materialized.paths.artifactRoot,
+    materialized.paths.manifestPath,
+    materialized.paths.shellRoot,
+    ...(materialized.runtimeArtifact == null
+      ? []
+      : [materialized.runtimeArtifact.path]),
+  ];
+  if (!(await Promise.all(materializedPaths.map(pathExists))).every(Boolean)) {
+    throw new ToolCodexError(
+      "BUILD_REPORT_PATHS_UNAVAILABLE",
+      "downloaded release bundle is incomplete for its build report",
+    );
+  }
+  return materialized;
 }
 
 async function collectArtifactEntries(
@@ -592,7 +689,7 @@ export async function prepareToolCodexPlugin(options: {
     managedCodexHome: options.paths.codexHome,
   });
   const buildReportPath = resolve(options.buildReportPath);
-  const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
+  const buildReport = await loadToolCodexBuildReport(buildReportPath);
   await verifyToolCodexArtifact(buildReport);
   const [{ marketplaceName }, launch] = await Promise.all([
     readMarketplace(buildReport),
@@ -840,7 +937,7 @@ export async function runToolCodexHandoffProbe(options: {
   runtimeBinding: ToolCodexRuntimeBinding;
 }): Promise<ToolCodexHandoffReport> {
   const buildReportPath = resolve(options.buildReportPath);
-  const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
+  const buildReport = await loadToolCodexBuildReport(buildReportPath);
   await verifyToolCodexArtifact(buildReport);
   return {
     buildReportPath,
@@ -864,9 +961,7 @@ export async function verifyAndRecordToolCodexRuntimeHandoff(options: {
   const lock = await acquireToolCodexGlobalLock(options.paths, "handoff");
   try {
     const buildReportPath = resolve(options.buildReportPath);
-    const buildReport = parseDistributionBuildReport(
-      await readJson(buildReportPath),
-    );
+    const buildReport = await loadToolCodexBuildReport(buildReportPath);
     const identityKey = distributionIdentityKey(buildReport.identity);
     const sentinel = await readToolCodexSentinel(options.paths);
     if (
@@ -1222,7 +1317,7 @@ async function recordToolCodexDesktopUiObservationUnlocked(
     );
   }
   const buildReportPath = resolve(options.buildReportPath);
-  const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
+  const buildReport = await loadToolCodexBuildReport(buildReportPath);
   const host = await inspectToolCodexEnvironment({
     appPath: options.appPath,
     codexBin: options.codexBin ?? "codex",
@@ -1316,7 +1411,7 @@ export async function runToolCodexAcceptance(options: {
   const fixtureReportUrl = sentinel.prepared?.runtime?.fixtureReportUrl
     ?? undefined;
   const buildReportPath = resolve(options.buildReportPath);
-  const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
+  const buildReport = await loadToolCodexBuildReport(buildReportPath);
   const { marketplaceName } = await readMarketplace(buildReport);
   const artifactValid = await verifyToolCodexArtifact(buildReport)
     .then(() => true)

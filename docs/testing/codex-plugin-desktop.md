@@ -46,6 +46,12 @@ The MCP entry is relative to the installed plugin cache, does not use user
   `OD_CODEX_PLUGIN_RUNTIME_MANIFEST_URL`, `OD_DATA_DIR`,
   `OD_DISTRIBUTION_CHANNEL_ROOT`.
 
+Formal release-channel artifacts derive their platform-standard product root
+from the embedded channel when `OD_DISTRIBUTION_CHANNEL_ROOT` is absent. The
+environment variable remains the authoritative override for controlled and
+isolated acceptance environments. Custom channels still require an explicit
+root.
+
 Controlled Desktop acceptance supports macOS and native x64 Windows. The
 Windows lane includes artifact build, offline stdio, marketplace
 install/update, MSIX/process discovery, and controlled Desktop lifecycle. Both
@@ -238,14 +244,18 @@ invalidates the host-integration probe.
 
 ## Production publication
 
-The runtime publisher consumes the target-host build report and writes only
-the Codex plugin R2 hierarchy:
+The Codex adapter's runtime publisher consumes the target-host build report
+and writes only the adapter-neutral product closure hierarchy:
 
 ```text
-codex-plugin/<channel>/<namespace>/<platform>/
+<channel>/closure/<platform>/
 ├── latest/runtime.json
 └── versions/<runtime-version>/runtime/runtime.zip
 ```
+
+The namespace remains in the verified manifest identity and local isolation;
+it is deliberately absent from the public object key. The Codex plugin is a
+consumer of this closure, not the owner of its public topology.
 
 Run a side-effect-free plan locally:
 
@@ -262,6 +272,10 @@ Immutable runtime uploads refuse replacement. `latest` uses conditional writes
 and refuses rollback or a same-version digest change. `release-beta` builds and
 plans this payload on the native macOS arm64 and Windows x64 jobs, publishing
 it only when the workflow's existing `publish` input is true.
+For `publish=false`, the native job uploads the complete platform root as a
+single acceptance artifact. `tools-codex` may materialize the report against
+that downloaded standard layout when the original runner paths no longer
+exist, then repeats the normal inventory and runtime digest verification.
 
 ## Managed acceptance environment
 

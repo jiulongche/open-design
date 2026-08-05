@@ -84,9 +84,11 @@ type RuntimeProcessHandle = {
 
 export const CODEX_PLUGIN_ACTIVE_MANIFEST_TIMEOUT_MS = 500;
 export const CODEX_PLUGIN_FIRST_MANIFEST_TIMEOUT_MS = 5_000;
+export const CODEX_PLUGIN_FIRST_ACQUISITION_TIMEOUT_MS = 110_000;
 export const CODEX_PLUGIN_LIVE_BINDING_PROBE_TIMEOUT_MS = 400;
 export const CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS = 45_000;
 export const CODEX_PLUGIN_RUNTIME_OBSERVER_TIMEOUT_MS = 50_000;
+const CODEX_PLUGIN_RUNTIME_DOWNLOAD_TIMEOUT_MS = 30_000;
 
 const RUNTIME_LEASE_ATTACH_TIMEOUT_MS =
   CODEX_PLUGIN_RUNTIME_OBSERVER_TIMEOUT_MS;
@@ -94,6 +96,18 @@ const RUNTIME_LEASE_POLL_INTERVAL_MS = 250;
 
 function opaqueId(prefix: string): string {
   return `${prefix}_${randomBytes(18).toString("base64url")}`;
+}
+
+function remainingAcquisitionTime(deadlineAt: number | null): number | null {
+  if (deadlineAt == null) return null;
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) {
+    throw new CodexPluginLauncherError(
+      "RUNTIME_ACQUISITION_TIMEOUT",
+      `first Open Design runtime acquisition exceeded ${CODEX_PLUGIN_FIRST_ACQUISITION_TIMEOUT_MS}ms`,
+    );
+  }
+  return remaining;
 }
 
 function tokenDigest(token: string): string {
@@ -441,6 +455,10 @@ function runCommand(
   command: string,
   args: readonly string[],
   errorCode = "RUNTIME_EXTRACT_FAILED",
+  options: {
+    timeoutCode?: string;
+    timeoutMs?: number | null;
+  } = {},
 ): Promise<string> {
   return new Promise<string>((resolveRun, rejectRun) => {
     const child = spawn(command, [...args], {
@@ -449,6 +467,25 @@ function runCommand(
     });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const timeout = options.timeoutMs == null
+      ? null
+      : setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          child.kill("SIGKILL");
+          rejectRun(new CodexPluginLauncherError(
+            options.timeoutCode ?? errorCode,
+            `${command} exceeded ${options.timeoutMs}ms`,
+          ));
+        }, options.timeoutMs);
+    timeout?.unref();
+    const settle = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout != null) clearTimeout(timeout);
+      action();
+    };
     const appendTail = (current: string, chunk: unknown): string =>
       `${current}${String(chunk)}`.slice(-4_000);
     child.stdout?.on("data", (chunk) => {
@@ -457,17 +494,17 @@ function runCommand(
     child.stderr?.on("data", (chunk) => {
       stderr = appendTail(stderr, chunk);
     });
-    child.once("error", rejectRun);
+    child.once("error", (error) => settle(() => rejectRun(error)));
     child.once("close", (code, signal) => {
       if (code === 0 && signal == null) {
-        resolveRun(stdout.trim());
+        settle(() => resolveRun(stdout.trim()));
         return;
       }
       const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
-      rejectRun(new CodexPluginLauncherError(
+      settle(() => rejectRun(new CodexPluginLauncherError(
         errorCode,
         `${command} failed with ${signal == null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`}${detail.length === 0 ? "" : `:\n${detail}`}`,
-      ));
+      )));
     });
   });
 }
@@ -555,6 +592,7 @@ async function openWindowsRuntimeLaunchPipe(environment: NodeJS.ProcessEnv): Pro
 
 async function launchWindowsBreakawayRuntime(options: {
   cwd: string;
+  deadlineAt: number | null;
   entryPath: string;
   environment: NodeJS.ProcessEnv;
 }): Promise<RuntimeProcessHandle> {
@@ -571,6 +609,10 @@ async function launchWindowsBreakawayRuntime(options: {
       "powershell.exe",
       windowsRuntimeProcessCreateArgs(commandLine, options.cwd),
       "RUNTIME_SPAWN_FAILED",
+      {
+        timeoutCode: "RUNTIME_ACQUISITION_TIMEOUT",
+        timeoutMs: remainingAcquisitionTime(options.deadlineAt),
+      },
     );
     const result = JSON.parse(stdout) as {
       processId?: unknown;
@@ -587,11 +629,17 @@ async function launchWindowsBreakawayRuntime(options: {
       );
     }
     pid = result.processId as number;
+    const deliveryBudget = Math.min(
+      10_000,
+      remainingAcquisitionTime(options.deadlineAt) ?? 10_000,
+    );
     await Promise.race([
       launchPipe.delivered,
-      sleep(10_000).then(() => {
+      sleep(deliveryBudget).then(() => {
         throw new CodexPluginLauncherError(
-          "RUNTIME_SPAWN_FAILED",
+          deliveryBudget < 10_000
+            ? "RUNTIME_ACQUISITION_TIMEOUT"
+            : "RUNTIME_SPAWN_FAILED",
           "Windows runtime did not connect to its private environment pipe",
         );
       }),
@@ -619,6 +667,7 @@ async function launchWindowsBreakawayRuntime(options: {
 
 async function launchRuntimeProcess(options: {
   cwd: string;
+  deadlineAt: number | null;
   entryPath: string;
   environment: NodeJS.ProcessEnv;
   useWindowsBreakaway: boolean;
@@ -638,8 +687,28 @@ async function launchRuntimeProcess(options: {
     },
   );
   await new Promise<void>((resolveSpawn, rejectSpawn) => {
-    child.once("error", rejectSpawn);
-    child.once("spawn", resolveSpawn);
+    let settled = false;
+    const timeoutMs = remainingAcquisitionTime(options.deadlineAt);
+    const timeout = timeoutMs == null
+      ? null
+      : setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          child.kill("SIGKILL");
+          rejectSpawn(new CodexPluginLauncherError(
+            "RUNTIME_ACQUISITION_TIMEOUT",
+            `runtime spawn exceeded the remaining ${timeoutMs}ms acquisition budget`,
+          ));
+        }, timeoutMs);
+    timeout?.unref();
+    const settle = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout != null) clearTimeout(timeout);
+      action();
+    };
+    child.once("error", (error) => settle(() => rejectSpawn(error)));
+    child.once("spawn", () => settle(resolveSpawn));
   });
   if (child.pid == null) {
     throw new CodexPluginLauncherError(
@@ -659,10 +728,19 @@ async function launchRuntimeProcess(options: {
 async function extractRuntimeArchive(
   archivePath: string,
   payloadRoot: string,
+  deadlineAt: number | null,
 ): Promise<void> {
   await mkdir(payloadRoot, { mode: 0o700, recursive: true });
   if (process.platform === "darwin") {
-    await runCommand("ditto", ["-x", "-k", archivePath, payloadRoot]);
+    await runCommand(
+      "ditto",
+      ["-x", "-k", archivePath, payloadRoot],
+      "RUNTIME_EXTRACT_FAILED",
+      {
+        timeoutCode: "RUNTIME_ACQUISITION_TIMEOUT",
+        timeoutMs: remainingAcquisitionTime(deadlineAt),
+      },
+    );
     return;
   }
   if (process.platform === "win32") {
@@ -673,6 +751,11 @@ async function extractRuntimeArchive(
     await runCommand(
       invocation.command,
       invocation.args,
+      "RUNTIME_EXTRACT_FAILED",
+      {
+        timeoutCode: "RUNTIME_ACQUISITION_TIMEOUT",
+        timeoutMs: remainingAcquisitionTime(deadlineAt),
+      },
     );
     return;
   }
@@ -683,6 +766,7 @@ async function extractRuntimeArchive(
 }
 
 async function acquireRuntimeArtifact(options: {
+  deadlineAt: number | null;
   fetchImpl: typeof fetch;
   manifest: CodexPluginAcquisitionManifestV1;
   storePaths: ReturnType<typeof resolveDistributionRuntimeStorePaths>;
@@ -703,6 +787,7 @@ async function acquireRuntimeArtifact(options: {
       : entryPath;
   if (await pathExists(installedArtifactPath)) {
     await verifyRuntimeArtifact(installedArtifactPath, options.manifest);
+    remainingAcquisitionTime(options.deadlineAt);
     if (!(await pathExists(entryPath))) {
       throw new CodexPluginLauncherError(
         "RUNTIME_ENTRY_MISSING",
@@ -712,10 +797,28 @@ async function acquireRuntimeArtifact(options: {
     return { entryPath, reused: true };
   }
 
-  const response = await options.fetchImpl(options.manifest.artifact.url, {
-    headers: { accept: options.manifest.artifact.mediaType },
-    signal: AbortSignal.timeout(30_000),
-  });
+  const remainingBeforeDownload = remainingAcquisitionTime(options.deadlineAt);
+  const downloadBoundedByAcquisition = remainingBeforeDownload != null
+    && remainingBeforeDownload <= CODEX_PLUGIN_RUNTIME_DOWNLOAD_TIMEOUT_MS;
+  const downloadTimeout = Math.min(
+    CODEX_PLUGIN_RUNTIME_DOWNLOAD_TIMEOUT_MS,
+    remainingBeforeDownload ?? CODEX_PLUGIN_RUNTIME_DOWNLOAD_TIMEOUT_MS,
+  );
+  let response: Response;
+  try {
+    response = await options.fetchImpl(options.manifest.artifact.url, {
+      headers: { accept: options.manifest.artifact.mediaType },
+      signal: AbortSignal.timeout(downloadTimeout),
+    });
+  } catch (error) {
+    throw new CodexPluginLauncherError(
+      downloadBoundedByAcquisition
+        ? "RUNTIME_ACQUISITION_TIMEOUT"
+        : "RUNTIME_DOWNLOAD_FAILED",
+      `runtime artifact download failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  remainingAcquisitionTime(options.deadlineAt);
   if (!response.ok) {
     throw new CodexPluginLauncherError(
       "RUNTIME_DOWNLOAD_FAILED",
@@ -723,6 +826,7 @@ async function acquireRuntimeArtifact(options: {
     );
   }
   const bytes = Buffer.from(await response.arrayBuffer());
+  remainingAcquisitionTime(options.deadlineAt);
   const digest = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
   if (bytes.byteLength !== options.manifest.artifact.size
     || digest !== options.manifest.artifact.digest) {
@@ -745,7 +849,11 @@ async function acquireRuntimeArtifact(options: {
     const stagingArchivePath = join(stagingRoot, "artifact.zip");
     await mkdir(stagingRoot, { mode: 0o700, recursive: true });
     await writeFile(stagingArchivePath, bytes, { mode: 0o600 });
-    await extractRuntimeArchive(stagingArchivePath, stagingPayloadRoot);
+    await extractRuntimeArchive(
+      stagingArchivePath,
+      stagingPayloadRoot,
+      options.deadlineAt,
+    );
     if (!(await pathExists(stagingEntryPath))) {
       throw new CodexPluginLauncherError(
         "RUNTIME_ENTRY_MISSING",
@@ -769,6 +877,7 @@ async function acquireRuntimeArtifact(options: {
     await rm(stagingRoot, { force: true, recursive: true });
   }
   await verifyRuntimeArtifact(installedArtifactPath, options.manifest);
+  remainingAcquisitionTime(options.deadlineAt);
   if (!(await pathExists(entryPath))) {
     throw new CodexPluginLauncherError(
       "RUNTIME_ENTRY_MISSING",
@@ -1149,6 +1258,7 @@ export class CodexPluginRuntimeLauncher {
   }
 
   async ensureRuntime(): Promise<CodexPluginRuntimeEnsureResult> {
+    const ensureStartedAt = Date.now();
     const storePaths = resolveDistributionRuntimeStorePaths(this.suitePaths);
     const shellPaths = resolveCodexPluginShellPaths(this.suitePaths);
     const activeRuntime = await readCompatibleActiveRuntime({
@@ -1158,6 +1268,9 @@ export class CodexPluginRuntimeLauncher {
     if (activeRuntime != null) {
       assertRuntimeCoordinates(this.identity, activeRuntime.pointer);
     }
+    const acquisitionDeadlineAt = activeRuntime == null
+      ? ensureStartedAt + CODEX_PLUGIN_FIRST_ACQUISITION_TIMEOUT_MS
+      : null;
 
     if (activeRuntime != null && this.session != null) {
       if (
@@ -1434,6 +1547,7 @@ export class CodexPluginRuntimeLauncher {
       await removeDeadRuntimeBinding({ path: storePaths.bindingPath });
 
       const acquired = await acquireRuntimeArtifact({
+        deadlineAt: acquisitionDeadlineAt,
         fetchImpl: this.fetchImpl,
         manifest,
         storePaths,
@@ -1455,6 +1569,7 @@ export class CodexPluginRuntimeLauncher {
 
       child = await launchRuntimeProcess({
         cwd: dirname(acquired.entryPath),
+        deadlineAt: acquisitionDeadlineAt,
         entryPath: acquired.entryPath,
         environment: {
           ...process.env,
@@ -1476,11 +1591,31 @@ export class CodexPluginRuntimeLauncher {
         useWindowsBreakaway:
           manifest.artifact.mediaType === CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1,
       });
+      const remainingBeforeReady = remainingAcquisitionTime(
+        acquisitionDeadlineAt,
+      );
+      const readyTimeout = Math.min(
+        CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS,
+        remainingBeforeReady ?? CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS,
+      );
       const ready = await waitForRuntimeReady(
         readyPath,
         child,
-        CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS,
+        readyTimeout,
       )
+        .catch((error) => {
+          if (
+            readyTimeout < CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS
+            && error instanceof CodexPluginLauncherError
+            && error.code === "RUNTIME_READY_TIMEOUT"
+          ) {
+            throw new CodexPluginLauncherError(
+              "RUNTIME_ACQUISITION_TIMEOUT",
+              `first Open Design runtime acquisition exceeded ${CODEX_PLUGIN_FIRST_ACQUISITION_TIMEOUT_MS}ms`,
+            );
+          }
+          throw error;
+        })
         .finally(async () => {
           await rm(readyPath, { force: true });
         });
@@ -1506,10 +1641,32 @@ export class CodexPluginRuntimeLauncher {
       });
       await writeJsonAtomic(handoffPath, handoff);
 
-      const observed = normalizeDistributionRuntimeIdentity(
-        await fetchJson(ready.endpointUrl, this.fetchImpl, 5_000),
+      const remainingBeforeObservation = remainingAcquisitionTime(
+        acquisitionDeadlineAt,
       );
+      const observationTimeout = Math.min(
+        5_000,
+        remainingBeforeObservation ?? 5_000,
+      );
+      let observedRaw: unknown;
+      try {
+        observedRaw = await fetchJson(
+          ready.endpointUrl,
+          this.fetchImpl,
+          observationTimeout,
+        );
+      } catch (error) {
+        if (observationTimeout < 5_000) {
+          throw new CodexPluginLauncherError(
+            "RUNTIME_ACQUISITION_TIMEOUT",
+            `first Open Design runtime acquisition exceeded ${CODEX_PLUGIN_FIRST_ACQUISITION_TIMEOUT_MS}ms`,
+          );
+        }
+        throw error;
+      }
+      const observed = normalizeDistributionRuntimeIdentity(observedRaw);
       assertSameDistributionRuntimeIdentity(expected, observed);
+      remainingAcquisitionTime(acquisitionDeadlineAt);
       const previousPointer = await readParsedJsonIfExists({
         code: "RUNTIME_ACTIVE_STATE_INVALID",
         label: "active runtime pointer",

@@ -22,6 +22,7 @@ import {
 import {
   CODEX_PLUGIN_ACTIVE_MANIFEST_TIMEOUT_MS,
   CODEX_PLUGIN_FIRST_MANIFEST_TIMEOUT_MS,
+  CODEX_PLUGIN_FIRST_ACQUISITION_TIMEOUT_MS,
   CODEX_PLUGIN_RUNTIME_OBSERVER_TIMEOUT_MS,
   CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS,
   CodexPluginRuntimeLauncher,
@@ -516,10 +517,85 @@ server.listen(0, "127.0.0.1", () => {
   it("uses the agreed first-install, active, ready, and observer budgets", () => {
     expect(CODEX_PLUGIN_ACTIVE_MANIFEST_TIMEOUT_MS).toBe(500);
     expect(CODEX_PLUGIN_FIRST_MANIFEST_TIMEOUT_MS).toBe(5_000);
+    expect(CODEX_PLUGIN_FIRST_ACQUISITION_TIMEOUT_MS).toBe(110_000);
     expect(CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS).toBe(45_000);
     expect(CODEX_PLUGIN_RUNTIME_OBSERVER_TIMEOUT_MS).toBeGreaterThanOrEqual(
       CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS + 5_000,
     );
+  });
+
+  it("returns a typed error when first acquisition exhausts its total budget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "od-codex-runtime-deadline-"));
+    roots.push(root);
+    const suitePaths = resolveCodexPluginSuitePaths(
+      resolveDistributionSuitePaths({
+        channel: "beta",
+        namespace: "release-beta-deadline",
+        namespaceBaseRoot: join(root, "namespaces"),
+      }),
+    );
+    const bytes = Buffer.from("process.exit(0);\n");
+    const digest =
+      `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+    const manifestUrl = "http://127.0.0.1:17456/deadline/manifest.json";
+    const artifactUrl = "http://127.0.0.1:17456/deadline/runtime.mjs";
+    const manifest = {
+      artifact: {
+        digest,
+        entryPath: "runtime.mjs",
+        mediaType: CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.NODE_MODULE_V1,
+        size: bytes.byteLength,
+        url: artifactUrl,
+      },
+      channel: "beta",
+      control: { codexPlugin: { version: { min: "0.1.0" } } },
+      namespace: "release-beta-deadline",
+      protocolVersion: 1,
+      runtimeDigest: digest,
+      runtimeVersion: "1.2.3-beta.4",
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+    } as const;
+    const realNow = Date.now();
+    let artifactRequested = false;
+    let nowSpy: ReturnType<typeof vi.spyOn> | null = null;
+    const launcher = new CodexPluginRuntimeLauncher({
+      fetchImpl: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url === manifestUrl) {
+          nowSpy = vi.spyOn(Date, "now").mockReturnValue(
+            realNow + CODEX_PLUGIN_FIRST_ACQUISITION_TIMEOUT_MS + 10_000,
+          );
+          return new Response(JSON.stringify(manifest), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url === artifactUrl) artifactRequested = true;
+        return new Response(bytes, {
+          headers: { "content-type": manifest.artifact.mediaType },
+        });
+      },
+      identity: {
+        channel: manifest.channel,
+        namespace: manifest.namespace,
+        protocolVersion: manifest.protocolVersion,
+        runtimeDigest: manifest.runtimeDigest,
+        runtimeVersion: manifest.runtimeVersion,
+        shellDigest: `sha256:${"b".repeat(64)}`,
+        shellType: "codex-plugin",
+        shellVersion: "0.1.0",
+      },
+      manifestUrl,
+      shellVersion: "0.1.0",
+      suitePaths,
+    });
+    try {
+      await expect(launcher.ensureRuntime()).rejects.toMatchObject({
+        code: "RUNTIME_ACQUISITION_TIMEOUT",
+      });
+      expect(artifactRequested).toBe(false);
+    } finally {
+      nowSpy?.mockRestore();
+    }
   });
 
   it("returns typed unavailable state when first installation cannot reach a manifest", async () => {

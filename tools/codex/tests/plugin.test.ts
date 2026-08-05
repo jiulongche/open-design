@@ -17,6 +17,7 @@ import {
   classifyToolCodexAcceptance,
   currentIdentityFromStdioObservation,
   inspectToolCodexDesktopScreenshot,
+  loadToolCodexBuildReport,
   parseCodexPluginToolTimeoutMs,
   parseToolCodexDesktopUiObservation,
   verifyToolCodexArtifact,
@@ -316,5 +317,80 @@ describe("tools-codex acceptance", () => {
     await expect(verifyToolCodexArtifact(report)).rejects.toMatchObject({
       code: "ARTIFACT_INTEGRITY_MISMATCH",
     });
+  });
+
+  it("materializes a downloaded release build report against its portable bundle", async () => {
+    const root = await mkdtemp(join(tmpdir(), "open-design-tools-codex-portable-"));
+    roots.push(root);
+    const bundleRoot = join(root, "darwin-arm64");
+    const artifactRoot = join(bundleRoot, "marketplace");
+    const shellRoot = join(artifactRoot, "plugins", "open-design");
+    const manifestPath = join(shellRoot, ".codex-plugin", "plugin.json");
+    const runtimePath = join(bundleRoot, "runtime", "runtime.zip");
+    await mkdir(join(shellRoot, ".codex-plugin"), { recursive: true });
+    await mkdir(join(bundleRoot, "runtime"), { recursive: true });
+    const manifestBytes = Buffer.from("{}\n");
+    const runtimeBytes = Buffer.from("release runtime\n");
+    await writeFile(manifestPath, manifestBytes);
+    await writeFile(runtimePath, runtimeBytes);
+    const artifact = calculateDistributionArtifactInventory([
+      { bytes: manifestBytes, path: ".codex-plugin/plugin.json" },
+    ]);
+    const runtimeDigest =
+      `sha256:${createHash("sha256").update(runtimeBytes).digest("hex")}`;
+    const identity = {
+      channel: "beta",
+      namespace: "release-beta",
+      protocolVersion: 2,
+      runtimeDigest,
+      runtimeVersion: "0.18.0-beta.1",
+      shellDigest: artifact.digest,
+      shellType: "codex-plugin",
+      shellVersion: "0.1.0",
+    } as const;
+    await writeFile(
+      join(shellRoot, "distribution.json"),
+      JSON.stringify(identity),
+    );
+    const unavailableRunnerRoot = join(root, "runner-temp", "darwin-arm64");
+    const report = {
+      artifact,
+      identity,
+      paths: {
+        artifactRoot: join(unavailableRunnerRoot, "marketplace"),
+        manifestPath: join(
+          unavailableRunnerRoot,
+          "marketplace",
+          "plugins",
+          "open-design",
+          ".codex-plugin",
+          "plugin.json",
+        ),
+        shellRoot: join(
+          unavailableRunnerRoot,
+          "marketplace",
+          "plugins",
+          "open-design",
+        ),
+      },
+      runtimeArtifact: {
+        digest: runtimeDigest,
+        entryPath: "runtime.mjs",
+        path: join(unavailableRunnerRoot, "runtime", "runtime.zip"),
+        size: runtimeBytes.byteLength,
+      },
+      schemaVersion: 1,
+    } as const;
+    const buildReportPath = join(bundleRoot, "build-report.json");
+    await writeFile(buildReportPath, JSON.stringify(report));
+
+    const materialized = await loadToolCodexBuildReport(buildReportPath);
+    expect(materialized.paths).toEqual({
+      artifactRoot,
+      manifestPath,
+      shellRoot,
+    });
+    expect(materialized.runtimeArtifact?.path).toBe(runtimePath);
+    await expect(verifyToolCodexArtifact(materialized)).resolves.toBeUndefined();
   });
 });

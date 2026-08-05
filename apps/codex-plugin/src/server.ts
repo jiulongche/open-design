@@ -17,7 +17,10 @@ import {
 } from "@open-design/contracts/mcp/od-catalog";
 import type { DistributionRuntimeBindingV1 } from "@open-design/distribution-proto";
 import { randomBytes } from "node:crypto";
-import { CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION } from "@open-design/codex-plugin-proto";
+import {
+  CODEX_PLUGIN_PLATFORM_TARGETS,
+  CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+} from "@open-design/codex-plugin-proto";
 
 import {
   readCodexPluginStatus,
@@ -111,8 +114,15 @@ async function run(): Promise<void> {
   const identity = await readDistributionIdentity(identityFile);
   const fixtureReportUrl = resolveFixtureReportUrl(args);
   const suite = observeCodexPluginSuite({ args, identity });
+  const hostTarget = process.platform === "darwin" && process.arch === "arm64"
+    ? CODEX_PLUGIN_PLATFORM_TARGETS.DARWIN_ARM64
+    : process.platform === "win32" && process.arch === "x64"
+      ? CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64
+      : null;
   const runtimeManifestUrl = resolveCodexPluginRuntimeManifestUrl(args)
-    ?? `https://releases.open-design.ai/codex-plugin/${identity.channel}/latest/runtime.json`;
+    ?? (hostTarget == null
+      ? null
+      : `https://releases.open-design.ai/${identity.channel}/closure/${hostTarget}/latest/runtime.json`);
   const runtimeLauncher = suite.configured && runtimeManifestUrl != null
     ? new CodexPluginRuntimeLauncher({
         identity,
