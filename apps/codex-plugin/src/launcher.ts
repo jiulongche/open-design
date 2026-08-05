@@ -9,7 +9,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, toNamespacedPath } from "node:path";
+import { dirname, join, toNamespacedPath, win32 } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import {
@@ -478,7 +478,7 @@ export function windowsRuntimeArchiveExtractionInvocation(
 ): { args: readonly string[]; command: string } {
   return {
     args: ["x", "-y", `-o${payloadRoot}`, archivePath],
-    command: join(dirname(nodeExecutablePath), "7zip", "7z.exe"),
+    command: win32.join(win32.dirname(nodeExecutablePath), "7zip", "7z.exe"),
   };
 }
 
