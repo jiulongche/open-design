@@ -15,6 +15,8 @@ import {
   parseCodexPluginAcquisitionManifest,
   parseCodexPluginFixtureReport,
   parseCodexPluginHandoffDescriptor,
+  parseCodexPluginMcpEnvelope,
+  parseCodexPluginRuntimeAccess,
   parseCodexPluginRuntimeReady,
   parseCodexPluginUpdateCheck,
   resolveCodexPluginReleasePaths,
@@ -89,6 +91,9 @@ describe("@open-design/codex-plugin-proto", () => {
     );
     expect(paths.handoffsRoot).toBe(
       join(paths.shellRoot, "state", "handoffs"),
+    );
+    expect(paths.accessPath).toBe(
+      join(paths.shellRoot, "state", "runtime-access.json"),
     );
     expect(paths.updateCheckPath).toBe(
       join(paths.shellRoot, "state", "update-check.json"),
@@ -244,6 +249,48 @@ describe("@open-design/codex-plugin-proto", () => {
       handoffId: "handoff_123456789",
       pid: 456,
     });
+  });
+
+  it("validates private runtime access state and protocol-v2 MCP envelopes", () => {
+    const access = parseCodexPluginRuntimeAccess({
+      accessToken: "a".repeat(43),
+      channel: "beta",
+      namespace: "release-beta",
+      protocolVersion: 2,
+      runtimeDigest: RUNTIME_DIGEST,
+      runtimeVersion: "1.2.3-beta.4",
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+    });
+    expect(access.accessToken).toHaveLength(43);
+
+    const envelope = parseCodexPluginMcpEnvelope({
+      method: "tools/call",
+      params: { arguments: {}, name: "collect_brief" },
+      protocolVersion: 2,
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+      session: {
+        host: { name: "codex", version: "1.0.0" },
+        id: "session_123456789",
+        plugin: {
+          distributionMechanism: "unknown",
+          id: "open-design",
+          publisherClass: "open_design_first_party",
+          version: "0.1.0",
+        },
+      },
+    });
+    expect(envelope).toMatchObject({
+      method: "tools/call",
+      protocolVersion: 2,
+      session: { id: "session_123456789" },
+    });
+    expect(() => parseCodexPluginMcpEnvelope({
+      ...envelope,
+      session: {
+        ...envelope.session,
+        plugin: { ...envelope.session.plugin, id: "spoofed" },
+      },
+    })).toThrow("must be open-design");
   });
 
   it("parses a loopback fixture report with a runtime manifest URL", () => {

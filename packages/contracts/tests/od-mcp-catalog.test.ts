@@ -10,6 +10,8 @@ import {
 describe("Open Design MCP catalog", () => {
   it("declares the complete product tool surface once", () => {
     expect(OD_MCP_TOOL_NAMES).toEqual([
+      "collect_brief",
+      "confirm_brief",
       "list_projects",
       "get_active_context",
       "get_artifact",
@@ -24,6 +26,8 @@ describe("Open Design MCP catalog", () => {
       "create_project",
       "list_skills",
       "list_plugins",
+      "start_vela_login",
+      "get_vela_login_status",
       "start_run",
       "get_run",
       "cancel_run",
@@ -34,6 +38,7 @@ describe("Open Design MCP catalog", () => {
 
   it("publishes the active resource and installed-content templates", () => {
     expect(OD_MCP_STATIC_RESOURCES.map(({ uri }) => uri)).toEqual([
+      "ui://open-design/artifact-card-v6.html",
       "od://focus/active",
     ]);
     expect(OD_MCP_RESOURCE_TEMPLATES.map(({ uriTemplate }) => uriTemplate))

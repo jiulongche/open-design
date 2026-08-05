@@ -29,6 +29,7 @@ export const CODEX_PLUGIN_ENV = Object.freeze({
 } as const);
 
 export const CODEX_PLUGIN_RUNTIME_ENV = Object.freeze({
+  ACCESS_TOKEN: "OD_CODEX_PLUGIN_ACCESS_TOKEN",
   CHANNEL: "OD_DISTRIBUTION_CHANNEL",
   DATA_ROOT: "OD_DATA_DIR",
   HANDOFF_ID: "OD_CODEX_PLUGIN_HANDOFF_ID",
@@ -111,6 +112,7 @@ export type CodexPluginAcquisitionManifestV1 = {
 };
 
 export type CodexPluginShellPaths = {
+  accessPath: string;
   acquisitionPath: string;
   cacheRoot: string;
   handoffsRoot: string;
@@ -170,6 +172,31 @@ export type CodexPluginRuntimeReadyV1 = {
   pid: number;
   resumeTokenDigest: string;
   schemaVersion: typeof CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION;
+};
+
+export type CodexPluginRuntimeAccessV1 = DistributionRuntimeIdentityV1 & {
+  accessToken: string;
+  schemaVersion: typeof CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION;
+};
+
+export type CodexPluginMcpEnvelopeV1 = {
+  method: "resources/list" | "resources/read" | "tools/call";
+  params: Record<string, unknown>;
+  protocolVersion: number;
+  schemaVersion: typeof CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION;
+  session: {
+    host: {
+      name: string;
+      version?: string;
+    };
+    id: string;
+    plugin: {
+      distributionMechanism: "git_marketplace" | "local_repo" | "manual" | "unknown";
+      id: "open-design";
+      publisherClass: "open_design_first_party";
+      version: string;
+    };
+  };
 };
 
 export type CodexPluginFixtureReportV1 = DistributionServeReportV1 & {
@@ -242,6 +269,18 @@ function normalizeHandoffId(value: unknown): string {
   ) {
     throw new CodexPluginProtocolError(
       "Codex plugin handoff id must be 16-128 URL-safe characters",
+    );
+  }
+  return value;
+}
+
+function normalizeAccessToken(value: unknown): string {
+  if (
+    typeof value !== "string"
+    || !/^[A-Za-z0-9_-]{32,256}$/.test(value)
+  ) {
+    throw new CodexPluginProtocolError(
+      "Codex plugin runtime access token must be 32-256 URL-safe characters",
     );
   }
   return value;
@@ -414,6 +453,7 @@ export function resolveCodexPluginShellPaths(
   const shellRoot = join(suitePaths.namespaceRoot, "codex-plugin");
   const stateRoot = join(shellRoot, "state");
   return {
+    accessPath: join(stateRoot, "runtime-access.json"),
     acquisitionPath: join(stateRoot, "acquisition.json"),
     cacheRoot: join(shellRoot, "cache"),
     handoffsRoot: join(stateRoot, "handoffs"),
@@ -822,6 +862,125 @@ export function parseCodexPluginRuntimeReady(
       "resume token digest",
     ),
     schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+  };
+}
+
+export function parseCodexPluginRuntimeAccess(
+  value: unknown,
+): CodexPluginRuntimeAccessV1 {
+  const record = assertRecord(value, "Codex plugin runtime access");
+  assertAllowedKeys(record, [
+    "accessToken",
+    "channel",
+    "namespace",
+    "protocolVersion",
+    "runtimeDigest",
+    "runtimeVersion",
+    "schemaVersion",
+  ], "Codex plugin runtime access");
+  if (record.schemaVersion !== CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION) {
+    throw new CodexPluginProtocolError(
+      `unsupported Codex plugin protocol schema version: ${String(record.schemaVersion)}`,
+    );
+  }
+  return {
+    ...normalizeDistributionRuntimeIdentity({
+      channel: record.channel,
+      namespace: record.namespace,
+      protocolVersion: record.protocolVersion,
+      runtimeDigest: record.runtimeDigest,
+      runtimeVersion: record.runtimeVersion,
+    }),
+    accessToken: normalizeAccessToken(record.accessToken),
+    schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+  };
+}
+
+export function parseCodexPluginMcpEnvelope(
+  value: unknown,
+): CodexPluginMcpEnvelopeV1 {
+  const record = assertRecord(value, "Codex plugin MCP envelope");
+  assertAllowedKeys(record, [
+    "method",
+    "params",
+    "protocolVersion",
+    "schemaVersion",
+    "session",
+  ], "Codex plugin MCP envelope");
+  if (record.schemaVersion !== CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION) {
+    throw new CodexPluginProtocolError(
+      `unsupported Codex plugin protocol schema version: ${String(record.schemaVersion)}`,
+    );
+  }
+  const methods = ["resources/list", "resources/read", "tools/call"] as const;
+  if (
+    typeof record.method !== "string"
+    || !methods.includes(record.method as (typeof methods)[number])
+  ) {
+    throw new CodexPluginProtocolError("unsupported Codex plugin MCP method");
+  }
+  const session = assertRecord(record.session, "Codex plugin MCP session");
+  assertAllowedKeys(session, ["host", "id", "plugin"], "Codex plugin MCP session");
+  const host = assertRecord(session.host, "Codex plugin MCP host");
+  assertAllowedKeys(host, ["name", "version"], "Codex plugin MCP host");
+  const plugin = assertRecord(session.plugin, "Codex plugin MCP identity");
+  assertAllowedKeys(plugin, [
+    "distributionMechanism",
+    "id",
+    "publisherClass",
+    "version",
+  ], "Codex plugin MCP identity");
+  const distributionMechanisms = [
+    "git_marketplace",
+    "local_repo",
+    "manual",
+    "unknown",
+  ] as const;
+  if (
+    typeof plugin.distributionMechanism !== "string"
+    || !distributionMechanisms.includes(
+      plugin.distributionMechanism as (typeof distributionMechanisms)[number],
+    )
+  ) {
+    throw new CodexPluginProtocolError(
+      "unsupported Codex plugin distribution mechanism",
+    );
+  }
+  if (plugin.id !== "open-design") {
+    throw new CodexPluginProtocolError(
+      "Codex plugin MCP identity must be open-design",
+    );
+  }
+  if (plugin.publisherClass !== "open_design_first_party") {
+    throw new CodexPluginProtocolError(
+      "Codex plugin MCP identity must be first party",
+    );
+  }
+  const params = assertRecord(record.params, "Codex plugin MCP params");
+  return {
+    method: record.method as CodexPluginMcpEnvelopeV1["method"],
+    params,
+    protocolVersion: normalizePositiveInteger(
+      record.protocolVersion,
+      "protocol version",
+    ),
+    schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+    session: {
+      host: {
+        name: normalizeNonEmptyString(host.name, "MCP host name"),
+        ...(host.version == null
+          ? {}
+          : { version: normalizeNonEmptyString(host.version, "MCP host version") }),
+      },
+      id: normalizeHandoffId(session.id),
+      plugin: {
+        distributionMechanism:
+          plugin.distributionMechanism as CodexPluginMcpEnvelopeV1["session"]["plugin"]["distributionMechanism"],
+        id: "open-design",
+        publisherClass: "open_design_first_party",
+        version: normalizeDistributionVersion(plugin.version, "plugin version"),
+      },
+    },
   };
 }
 

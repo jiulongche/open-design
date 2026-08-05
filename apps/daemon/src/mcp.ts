@@ -317,6 +317,12 @@ export async function listMcpResources(baseUrl: string) {
   return { resources };
 }
 
+const READ_ANNOTATIONS = {
+  readOnlyHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
+};
+
 const WRITE_ANNOTATIONS = {
   readOnlyHint: false,
   idempotentHint: false,

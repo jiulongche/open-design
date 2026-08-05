@@ -39,12 +39,23 @@ const server = createServer(async (request, response) => {
     response.end(JSON.stringify(identity));
     return;
   }
+  if (
+    request.headers.authorization
+    !== "Bearer " + process.env.${CODEX_PLUGIN_RUNTIME_ENV.ACCESS_TOKEN}
+  ) {
+    response.statusCode = 401;
+    response.end(JSON.stringify({ error: "missing bearer" }));
+    return;
+  }
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
   const message = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   if (
     request.method === "POST"
     && request.url === "/mcp"
+    && message.protocolVersion === 2
+    && message.session?.plugin?.id === "open-design"
+    && message.session?.plugin?.version === "0.1.0"
     && message.method === "tools/call"
     && message.params?.name === "list_projects"
   ) {
@@ -90,7 +101,7 @@ const RUNTIME_DIGEST =
 const IDENTITY = {
   channel: "beta",
   namespace: "relocated",
-  protocolVersion: 1,
+  protocolVersion: 2,
   runtimeDigest: RUNTIME_DIGEST,
   runtimeVersion: "0.16.1-beta.1",
   shellDigest: `sha256:${"b".repeat(64)}`,
@@ -243,6 +254,21 @@ describe("Codex plugin stdio MCP", () => {
       )).toEqual({
         projects: [{ id: "shared-project", name: "Shared project" }],
       });
+      const access = JSON.parse(await readFile(join(
+        channelRoot,
+        "namespaces",
+        IDENTITY.namespace,
+        "codex-plugin",
+        "state",
+        "runtime-access.json",
+      ), "utf8"));
+      expect(access).toMatchObject({
+        channel: IDENTITY.channel,
+        namespace: IDENTITY.namespace,
+        protocolVersion: 2,
+        runtimeDigest: IDENTITY.runtimeDigest,
+      });
+      expect(access.accessToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
     } finally {
       await client.close();
       const bindingPath = join(

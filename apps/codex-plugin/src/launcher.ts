@@ -21,6 +21,7 @@ import {
   compareCodexPluginShellVersions,
   parseCodexPluginAcquisitionManifest,
   parseCodexPluginHandoffDescriptor,
+  parseCodexPluginRuntimeAccess,
   parseCodexPluginRuntimeReady,
   parseCodexPluginUpdateCheck,
   resolveCodexPluginShellPaths,
@@ -989,6 +990,27 @@ export class CodexPluginRuntimeLauncher {
     });
     this.updateStatus = status;
     return status;
+  }
+
+  async readRuntimeAccessToken(
+    binding: DistributionRuntimeBindingV1,
+  ): Promise<string | null> {
+    if (binding.protocolVersion < 2) return null;
+    const shellPaths = resolveCodexPluginShellPaths(this.suitePaths);
+    const accessState = await readParsedJsonIfExists({
+      code: "RUNTIME_ACCESS_STATE_INVALID",
+      label: "runtime access state",
+      parse: parseCodexPluginRuntimeAccess,
+      path: shellPaths.accessPath,
+    });
+    if (accessState == null) {
+      throw new CodexPluginLauncherError(
+        "RUNTIME_ACCESS_UNAVAILABLE",
+        "protocol-v2 runtime access state is missing",
+      );
+    }
+    assertSameDistributionRuntimeIdentity(binding, accessState);
+    return accessState.accessToken;
   }
 
   private async fetchRequestedManifest(

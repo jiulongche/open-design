@@ -16,6 +16,8 @@ import {
   OD_MCP_TOOL_NAMES,
 } from "@open-design/contracts/mcp/od-catalog";
 import type { DistributionRuntimeBindingV1 } from "@open-design/distribution-proto";
+import { randomBytes } from "node:crypto";
+import { CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION } from "@open-design/codex-plugin-proto";
 
 import {
   readCodexPluginStatus,
@@ -34,6 +36,22 @@ export const STATUS_TOOL_NAME = "get_open_design_status";
 export const ENSURE_RUNTIME_TOOL_NAME = "ensure_open_design_runtime";
 const IDENTITY_RESOURCE_URI = "od://distribution/identity";
 const PRODUCT_TOOL_NAMES = new Set(OD_MCP_TOOL_NAMES);
+const MCP_SESSION_ID = `session_${randomBytes(18).toString("base64url")}`;
+
+type RuntimeMcpMessage = {
+  method: "resources/read" | "tools/call";
+  params: Record<string, unknown>;
+};
+
+type RuntimeMcpSession = {
+  host: { name: string; version?: string };
+  plugin: {
+    distributionMechanism: "unknown";
+    id: "open-design";
+    publisherClass: "open_design_first_party";
+    version: string;
+  };
+};
 
 function runtimeMcpUrl(binding: DistributionRuntimeBindingV1): string {
   const url = new URL(binding.endpointUrl);
@@ -45,13 +63,31 @@ function runtimeMcpUrl(binding: DistributionRuntimeBindingV1): string {
 
 async function proxyRuntimeMcp<Result>(
   binding: DistributionRuntimeBindingV1,
-  message: unknown,
+  message: RuntimeMcpMessage,
+  accessToken: string | null,
+  session: RuntimeMcpSession,
 ): Promise<Result> {
   const url = runtimeMcpUrl(binding);
+  if (binding.protocolVersion >= 2 && accessToken == null) {
+    throw new Error("protocol-v2 Open Design runtime access token is missing");
+  }
   const response = await fetch(url, {
-    body: JSON.stringify(message),
+    body: JSON.stringify(binding.protocolVersion >= 2
+      ? {
+          ...message,
+          protocolVersion: binding.protocolVersion,
+          schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+          session: {
+            ...session,
+            id: MCP_SESSION_ID,
+          },
+        }
+      : message),
     headers: {
       accept: "application/json",
+      ...(accessToken == null
+        ? {}
+        : { authorization: `Bearer ${accessToken}` }),
       "content-type": "application/json",
     },
     method: "POST",
@@ -85,6 +121,26 @@ async function run(): Promise<void> {
         suitePaths: suite.paths,
       })
     : null;
+
+  const runtimeSession = (): RuntimeMcpSession => {
+    const client = server.getClientVersion();
+    return {
+      host: {
+        name: typeof client?.name === "string" && client.name.length > 0
+          ? client.name
+          : "codex_unknown",
+        ...(typeof client?.version === "string" && client.version.length > 0
+          ? { version: client.version }
+          : {}),
+      },
+      plugin: {
+        distributionMechanism: "unknown",
+        id: "open-design",
+        publisherClass: "open_design_first_party",
+        version: identity.shellVersion,
+      },
+    };
+  };
 
   const server = new Server(
     {
@@ -175,10 +231,11 @@ async function run(): Promise<void> {
       );
     }
     const result = await runtimeLauncher.ensureRuntime();
+    const accessToken = await runtimeLauncher.readRuntimeAccessToken(result.binding);
     return await proxyRuntimeMcp<ReadResourceResult>(result.binding, {
       method: "resources/read",
       params: { uri: request.params.uri },
-    });
+    }, accessToken, runtimeSession());
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -229,13 +286,14 @@ async function run(): Promise<void> {
       );
     }
     const result = await runtimeLauncher.ensureRuntime();
+    const accessToken = await runtimeLauncher.readRuntimeAccessToken(result.binding);
     return await proxyRuntimeMcp<CallToolResult>(result.binding, {
       method: "tools/call",
       params: {
         arguments: request.params.arguments ?? {},
         name: request.params.name,
       },
-    });
+    }, accessToken, runtimeSession());
   });
 
   const transport = new StdioServerTransport();

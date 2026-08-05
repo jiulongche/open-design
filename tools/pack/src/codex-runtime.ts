@@ -23,6 +23,7 @@ import { copyBundledResourceTrees, winResources } from "./resources.js";
 const RUNTIME_INTERNAL_PACKAGES = [
   { directory: "packages/release", name: "@open-design/release" },
   { directory: "packages/contracts", name: "@open-design/contracts" },
+  { directory: "packages/codex-plugin-proto", name: "@open-design/codex-plugin-proto" },
   { directory: "packages/registry-protocol", name: "@open-design/registry-protocol" },
   { directory: "packages/sidecar-proto", name: "@open-design/sidecar-proto" },
   { directory: "packages/distribution-proto", name: "@open-design/distribution-proto" },
@@ -167,7 +168,7 @@ async function packWorkspaceTarballs(
 
 export function codexProductionRuntimeSource(): string {
   return `import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { appendFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { connect } from "node:net";
@@ -223,6 +224,7 @@ const runtimeRoot = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(runtimeRoot, "node_modules");
 const daemonCli = join(projectRoot, "@open-design", "daemon", "dist", "cli.js");
 const daemonMcp = join(projectRoot, "@open-design", "daemon", "dist", "mcp.js");
+const codexPluginProto = join(projectRoot, "@open-design", "codex-plugin-proto", "dist", "index.mjs");
 const resourceRoot = join(projectRoot, "open-design");
 const logsRoot = runtimeEnvironment[env.LOGS_ROOT];
 const logPath = join(logsRoot, "runtime", "latest.log");
@@ -297,10 +299,25 @@ if (!health.ok) {
 await appendFile(logPath, "[codex-plugin-runtime] ready daemon=" + daemonUrl + "\\n", "utf8");
 
 const {
+  createMcpGatewaySession,
   handleMcpToolCall,
   listMcpResources,
   readMcpResource,
 } = await import(pathToFileURL(daemonMcp).href);
+const { parseCodexPluginMcpEnvelope } = await import(
+  pathToFileURL(codexPluginProto).href
+);
+const gatewaySessions = new Map();
+
+const authorized = (request) => {
+  if (identity.protocolVersion < 2) return true;
+  const supplied = request.headers.authorization;
+  const expected = "Bearer " + accessToken;
+  if (typeof supplied !== "string" || supplied.length !== expected.length) {
+    return false;
+  }
+  return timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+};
 
 const sendJson = (response, statusCode, payload) => {
   response.statusCode = statusCode;
@@ -332,14 +349,47 @@ const identityServer = createServer(async (request, response) => {
       sendJson(response, 404, { error: "not found" });
       return;
     }
-    const message = await readJsonBody(request);
+    if (!authorized(request)) {
+      sendJson(response, 401, { error: "runtime MCP authorization failed" });
+      return;
+    }
+    const rawMessage = await readJsonBody(request);
+    const message = identity.protocolVersion >= 2
+      ? parseCodexPluginMcpEnvelope(rawMessage)
+      : rawMessage;
+    if (
+      identity.protocolVersion >= 2
+      && message.protocolVersion !== identity.protocolVersion
+    ) {
+      sendJson(response, 409, { error: "runtime MCP protocol version mismatch" });
+      return;
+    }
     let result;
     if (message.method === "tools/call") {
-      result = await handleMcpToolCall(
-        daemonUrl,
-        message.params?.name,
-        message.params?.arguments ?? {},
-      );
+      if (identity.protocolVersion >= 2) {
+        let session = gatewaySessions.get(message.session.id);
+        if (session == null) {
+          if (gatewaySessions.size >= 32) {
+            gatewaySessions.delete(gatewaySessions.keys().next().value);
+          }
+          session = await createMcpGatewaySession({
+            baseUrl: daemonUrl,
+            clientInfo: message.session.host,
+            externalPluginContext: message.session.plugin,
+          });
+          gatewaySessions.set(message.session.id, session);
+        }
+        result = await session.call(
+          message.params?.name,
+          message.params?.arguments ?? {},
+        );
+      } else {
+        result = await handleMcpToolCall(
+          daemonUrl,
+          message.params?.name,
+          message.params?.arguments ?? {},
+        );
+      }
     } else if (message.method === "resources/list") {
       result = await listMcpResources(daemonUrl);
     } else if (message.method === "resources/read") {

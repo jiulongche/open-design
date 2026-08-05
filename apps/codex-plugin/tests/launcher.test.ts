@@ -10,6 +10,7 @@ import {
   CODEX_PLUGIN_RUNTIME_ENV,
   CODEX_PLUGIN_RUNTIME_MEDIA_TYPES,
   CODEX_PLUGIN_UPDATE_CHECK_STATES,
+  resolveCodexPluginShellPaths,
   resolveCodexPluginSuitePaths,
 } from "@open-design/codex-plugin-proto";
 import {
