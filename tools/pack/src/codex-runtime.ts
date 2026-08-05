@@ -18,7 +18,7 @@ import {
 } from "@open-design/codex-plugin-proto";
 import { createPackageManagerInvocation } from "@open-design/platform";
 
-import { copyBundledResourceTrees } from "./resources.js";
+import { copyBundledResourceTrees, winResources } from "./resources.js";
 
 const RUNTIME_INTERNAL_PACKAGES = [
   { directory: "packages/release", name: "@open-design/release" },
@@ -45,9 +45,66 @@ export type CodexProductionRuntimeArtifact = {
   size: number;
 };
 
+export type CodexProductionRuntimeArchiveInvocation = {
+  args: readonly string[];
+  command: string;
+};
+
+export function resolveCodexProductionRuntimeArchiveInvocation(options: {
+  arch?: string;
+  artifactPath: string;
+  platform?: NodeJS.Platform;
+}): CodexProductionRuntimeArchiveInvocation {
+  const platform = options.platform ?? process.platform;
+  const arch = options.arch ?? process.arch;
+  if (platform === "darwin" && arch === "arm64") {
+    return {
+      args: [
+        "-c",
+        "-k",
+        "--sequesterRsrc",
+        "--rsrc",
+        ".",
+        options.artifactPath,
+      ],
+      command: "ditto",
+    };
+  }
+  if (platform === "win32" && arch === "x64") {
+    return {
+      args: ["a", "-tzip", "-mx=5", options.artifactPath, ".\\*"],
+      command: winResources.sevenZipExe,
+    };
+  }
+  throw new Error(
+    `Codex production runtime requires darwin-arm64 or win32-x64; got ${platform}-${arch}`,
+  );
+}
+
+async function resolveNodeNpmCliPath(nodeExecutable = process.execPath): Promise<string> {
+  const executableRoot = dirname(nodeExecutable);
+  const candidates = process.platform === "win32"
+    ? [join(executableRoot, "node_modules", "npm", "bin", "npm-cli.js")]
+    : [
+        join(dirname(executableRoot), "lib", "node_modules", "npm", "bin", "npm-cli.js"),
+        join(executableRoot, "node_modules", "npm", "bin", "npm-cli.js"),
+      ];
+  for (const candidate of candidates) {
+    try {
+      if ((await stat(candidate)).isFile()) return candidate;
+    } catch {
+      // Continue through the known Node distribution layouts.
+    }
+  }
+  throw new Error(
+    `Codex production runtime could not resolve npm-cli.js beside ${nodeExecutable}`,
+  );
+}
+
 function run(command: string, args: readonly string[], options: {
   cwd: string;
   env?: NodeJS.ProcessEnv;
+  windowsVerbatimArguments?: boolean;
 }): Promise<void> {
   return new Promise<void>((resolveRun, rejectRun) => {
     const child = spawn(command, [...args], {
@@ -55,6 +112,7 @@ function run(command: string, args: readonly string[], options: {
       env: options.env ?? process.env,
       stdio: "inherit",
       windowsHide: true,
+      windowsVerbatimArguments: options.windowsVerbatimArguments,
     });
     child.once("error", rejectRun);
     child.once("close", (code, signal) => {
@@ -92,6 +150,7 @@ async function packWorkspaceTarballs(
     await run(invocation.command, invocation.args, {
       cwd: workspaceRoot,
       env: process.env,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
     });
     const after = await readdir(tarballsRoot);
     const created = after.filter((entry) => !before.has(entry));
@@ -111,24 +170,76 @@ export function codexProductionRuntimeSource(): string {
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, rename, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { connect } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const env = ${JSON.stringify(CODEX_PLUGIN_RUNTIME_ENV)};
+const loadRuntimeEnvironment = async () => {
+  const launchPipeIndex = process.argv.indexOf("--launch-pipe");
+  if (launchPipeIndex < 0) return process.env;
+  const launchPipePath = process.argv[launchPipeIndex + 1];
+  if (typeof launchPipePath !== "string" || launchPipePath.length === 0) {
+    throw new Error("Windows Codex runtime launch pipe path is missing");
+  }
+  const raw = await new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    const socket = connect(launchPipePath);
+    const timeout = setTimeout(() => {
+      socket.destroy(new Error("Windows Codex runtime launch pipe timed out"));
+    }, 10_000);
+    timeout.unref();
+    socket.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 1024 * 1024) {
+        socket.destroy(new Error("Windows Codex runtime launch environment is too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    socket.once("end", () => {
+      clearTimeout(timeout);
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+  });
+  const parsed = JSON.parse(raw);
+  if (
+    parsed == null
+    || typeof parsed !== "object"
+    || Array.isArray(parsed)
+    || !Object.values(parsed).every((value) => typeof value === "string")
+  ) {
+    throw new Error("Windows Codex runtime launch environment is invalid");
+  }
+  return { ...process.env, ...parsed };
+};
+const runtimeEnvironment = await loadRuntimeEnvironment();
 const runtimeRoot = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(runtimeRoot, "node_modules");
 const daemonCli = join(projectRoot, "@open-design", "daemon", "dist", "cli.js");
 const daemonMcp = join(projectRoot, "@open-design", "daemon", "dist", "mcp.js");
 const resourceRoot = join(projectRoot, "open-design");
-const logsRoot = process.env[env.LOGS_ROOT];
+const logsRoot = runtimeEnvironment[env.LOGS_ROOT];
 const logPath = join(logsRoot, "runtime", "latest.log");
 const identity = {
-  channel: process.env[env.CHANNEL],
-  namespace: process.env[env.NAMESPACE],
-  protocolVersion: Number(process.env[env.PROTOCOL_VERSION]),
-  runtimeDigest: process.env[env.RUNTIME_DIGEST],
-  runtimeVersion: process.env[env.RUNTIME_VERSION],
+  channel: runtimeEnvironment[env.CHANNEL],
+  namespace: runtimeEnvironment[env.NAMESPACE],
+  protocolVersion: Number(runtimeEnvironment[env.PROTOCOL_VERSION]),
+  runtimeDigest: runtimeEnvironment[env.RUNTIME_DIGEST],
+  runtimeVersion: runtimeEnvironment[env.RUNTIME_VERSION],
 };
+const accessToken = runtimeEnvironment[env.ACCESS_TOKEN];
+if (
+  identity.protocolVersion >= 2
+  && (typeof accessToken !== "string" || !/^[A-Za-z0-9_-]{32,256}$/.test(accessToken))
+) {
+  throw new Error("protocol-v2 Codex runtime requires a valid access token");
+}
 
 await mkdir(dirname(logPath), { recursive: true });
 await writeFile(logPath, "", "utf8");
@@ -142,10 +253,10 @@ const daemon = spawn(process.execPath, [
 ], {
   cwd: projectRoot,
   env: {
-    ...process.env,
+    ...runtimeEnvironment,
     OD_BIN: daemonCli,
     OD_DAEMON_CLI_PATH: daemonCli,
-    OD_DATA_DIR: process.env[env.DATA_ROOT],
+    OD_DATA_DIR: runtimeEnvironment[env.DATA_ROOT],
     OD_NODE_BIN: process.execPath,
     OD_RESOURCE_ROOT: resourceRoot,
   },
@@ -257,14 +368,14 @@ if (address == null || typeof address === "string") {
   throw new Error("Codex runtime identity server did not bind to TCP");
 }
 
-const readyPath = process.env[env.READY_PATH];
+const readyPath = runtimeEnvironment[env.READY_PATH];
 const temporaryPath = readyPath + "." + process.pid + ".tmp";
 const ready = {
   endpointUrl: "http://127.0.0.1:" + address.port + "/status",
-  handoffId: process.env[env.HANDOFF_ID],
+  handoffId: runtimeEnvironment[env.HANDOFF_ID],
   pid: process.pid,
   resumeTokenDigest: "sha256:" + createHash("sha256")
-    .update(process.env[env.HANDOFF_TOKEN])
+    .update(runtimeEnvironment[env.HANDOFF_TOKEN])
     .digest("hex"),
   schemaVersion: 1,
 };
@@ -300,11 +411,9 @@ export async function buildCodexProductionRuntime(options: {
   stageRoot: string;
   workspaceRoot: string;
 }): Promise<CodexProductionRuntimeArtifact> {
-  if (process.platform !== "darwin" || process.arch !== "arm64") {
-    throw new Error(
-      `Codex production runtime is currently gated to darwin-arm64; got ${process.platform}-${process.arch}`,
-    );
-  }
+  const archiveInvocation = resolveCodexProductionRuntimeArchiveInvocation({
+    artifactPath: options.artifactPath,
+  });
 
   const appRoot = join(options.stageRoot, "app");
   const tarballsRoot = join(options.stageRoot, "tarballs");
@@ -324,7 +433,12 @@ export async function buildCodexProductionRuntime(options: {
     private: true,
     version: options.runtimeVersion,
   }, null, 2)}\n`, "utf8");
-  await run("npm", ["install", "--omit=dev", "--no-package-lock"], {
+  await run(process.execPath, [
+    await resolveNodeNpmCliPath(),
+    "install",
+    "--omit=dev",
+    "--no-package-lock",
+  ], {
     cwd: appRoot,
     env: process.env,
   });
@@ -352,14 +466,7 @@ export async function buildCodexProductionRuntime(options: {
   await chmod(entryPath, 0o700);
   await mkdir(dirname(options.artifactPath), { recursive: true });
   await rm(options.artifactPath, { force: true });
-  await run("ditto", [
-    "-c",
-    "-k",
-    "--sequesterRsrc",
-    "--rsrc",
-    ".",
-    options.artifactPath,
-  ], { cwd: appRoot });
+  await run(archiveInvocation.command, archiveInvocation.args, { cwd: appRoot });
   const bytes = await readFile(options.artifactPath);
   await rm(options.stageRoot, { force: true, recursive: true });
   return {

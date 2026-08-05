@@ -394,6 +394,27 @@ describe("release workflows", () => {
     expect(stablePrepare).toContain('setOutput("publish_side_effects_enabled"');
   });
 
+  it("builds and plans protocol-v2 Codex plugin runtimes on both beta native hosts", async () => {
+    const beta = await readFile(
+      new URL("../../../.github/workflows/release-beta.yml", import.meta.url),
+      "utf8",
+    );
+    const mac = sectionBetween(beta, "  build_mac_arm64:", "  build_mac_x64:");
+    const win = sectionBetween(beta, "  build_win_x64:", "  build_linux_x64:");
+
+    for (const [lane, platform] of [
+      [mac, "darwin-arm64"],
+      [win, "win32-x64"],
+    ] as const) {
+      expect(lane).toContain("tools-pack codex-plugin build");
+      expect(lane).toContain(`--platform ${platform}`);
+      expect(lane).toContain("--protocol-version 2");
+      expect(lane).toContain("--runtime-mode production");
+      expect(lane).toContain(`CODEX_PLUGIN_PLATFORM: ${platform}`);
+      expect(lane).toContain("tools-release publish-codex-plugin");
+    }
+  });
+
   it("passes launcher version floor repo vars through to metadata publish and verify verbatim", async () => {
     const [beta, betaSelfHosted, preview, prerelease, stable] = await Promise.all([
       readFile(new URL("../../../.github/workflows/release-beta.yml", import.meta.url), "utf8"),

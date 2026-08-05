@@ -28,15 +28,16 @@ sufficient for a product-level gate.
 
 ## Release lanes
 
-| Lane | Host | Required for first beta | Purpose |
+| Lane | Host | Release requirement | Purpose |
 | --- | --- | --- | --- |
 | Protocol/unit | Linux, macOS, or Windows | Yes | Pure schemas, selectors, state transitions, and negative cases |
 | macOS artifact | Native `darwin-arm64` | Yes | Node 24 carrier, relocatable marketplace, production runtime ZIP |
 | macOS lifecycle | Native `darwin-arm64` | Yes | Cold start, update, rollback, self-heal, real Codex CLI |
 | macOS Desktop | Native `darwin-arm64` | Yes | Installed plugin discovery and operator-observed UI tool call |
 | Publication plan | Any host with the target build report | Yes | Immutable object paths, latest CAS, rollback refusal, no side effects |
-| Windows artifact | Native `win32-x64` | Follow-up production lane | Carrier, relocation, MAX_PATH, offline stdio |
-| Windows lifecycle/Desktop | Native `win32-x64` | Follow-up production lane | Runtime lifecycle and controlled MSIX Desktop acceptance |
+| Windows artifact | Native `win32-x64` | Required for Windows beta | Carrier, bundled extraction, relocation, MAX_PATH, offline stdio |
+| Windows CLI lifecycle | Native `win32-x64` | Required for Windows beta | Production runtime cold start, detach, reattach, offline fallback, real Codex CLI |
+| Windows Desktop | Native `win32-x64` | Required for Windows Desktop acceptance | Controlled MSIX discovery and operator-observed UI tool call |
 | Linux native artifact | Linux | `NOT_APPLICABLE` | Native Linux Codex plugin delivery is deliberately disabled |
 
 Linux workspace CI must still execute every platform-independent protocol,
@@ -162,8 +163,10 @@ home state must not enter the bundle.
 
 ## Release decision
 
-The macOS arm64 beta is deliverable only when every capability marked required
-for the first beta is `PASS`, except the already-declared low-frequency public
-marketplace shell URL follow-up in `ODP-F04`. Windows remains a separate
-required production lane before Windows delivery is enabled. Linux native
-delivery remains disabled even when all platform-independent tests pass.
+The macOS arm64 beta is deliverable only when every applicable required
+capability is `PASS`, except the already-declared low-frequency public
+marketplace shell URL follow-up in `ODP-F04`. A Windows beta additionally
+requires the native artifact and real-CLI lifecycle lanes. Controlled Windows
+Desktop acceptance remains a separate operator-observed gate and cannot be
+inferred from CLI evidence. Linux native delivery remains disabled even when
+all platform-independent tests pass.

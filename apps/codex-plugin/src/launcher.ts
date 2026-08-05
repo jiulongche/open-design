@@ -1,5 +1,6 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { createServer } from "node:net";
 import {
   access,
   mkdir,
@@ -71,7 +72,13 @@ export class CodexPluginLauncherError extends Error {
 
 type RuntimeSession = {
   binding: DistributionRuntimeBindingV1;
-  child: ChildProcess | null;
+  child: RuntimeProcessHandle | null;
+};
+
+type RuntimeProcessHandle = {
+  kill: (signal: NodeJS.Signals) => void;
+  pid: number;
+  unref: () => void;
 };
 
 export const CODEX_PLUGIN_ACTIVE_MANIFEST_TIMEOUT_MS = 500;
@@ -429,24 +436,223 @@ async function verifyRuntimeArtifact(path: string, manifest: CodexPluginAcquisit
   }
 }
 
-function runCommand(command: string, args: readonly string[]): Promise<void> {
-  return new Promise<void>((resolveRun, rejectRun) => {
+function runCommand(
+  command: string,
+  args: readonly string[],
+  errorCode = "RUNTIME_EXTRACT_FAILED",
+): Promise<string> {
+  return new Promise<string>((resolveRun, rejectRun) => {
     const child = spawn(command, [...args], {
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    const appendTail = (current: string, chunk: unknown): string =>
+      `${current}${String(chunk)}`.slice(-4_000);
+    child.stdout?.on("data", (chunk) => {
+      stdout = appendTail(stdout, chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = appendTail(stderr, chunk);
     });
     child.once("error", rejectRun);
     child.once("close", (code, signal) => {
       if (code === 0 && signal == null) {
-        resolveRun();
+        resolveRun(stdout.trim());
         return;
       }
+      const detail = [stderr.trim(), stdout.trim()].filter(Boolean).join("\n");
       rejectRun(new CodexPluginLauncherError(
-        "RUNTIME_EXTRACT_FAILED",
-        `${command} failed with ${signal == null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`}`,
+        errorCode,
+        `${command} failed with ${signal == null ? `exit code ${code ?? "unknown"}` : `signal ${signal}`}${detail.length === 0 ? "" : `:\n${detail}`}`,
       ));
     });
   });
+}
+
+export function windowsRuntimeArchiveExtractionInvocation(
+  archivePath: string,
+  payloadRoot: string,
+  nodeExecutablePath = process.execPath,
+): { args: readonly string[]; command: string } {
+  return {
+    args: ["x", "-y", `-o${payloadRoot}`, archivePath],
+    command: join(dirname(nodeExecutablePath), "7zip", "7z.exe"),
+  };
+}
+
+function quoteWindowsCommandLineArgument(value: string): string {
+  if (value.length > 0 && !/[\s"]/u.test(value)) return value;
+  return `"${value
+    .replace(/(\\*)"/gu, "$1$1\\\"")
+    .replace(/(\\+)$/u, "$1$1")}"`;
+}
+
+export function windowsRuntimeProcessCreateArgs(
+  commandLine: string,
+  currentDirectory: string,
+): readonly string[] {
+  return [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "& { param($commandLineBase64, $currentDirectoryBase64) $commandLine = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($commandLineBase64)); $currentDirectory = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($currentDirectoryBase64)); $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine; CurrentDirectory = $currentDirectory }; [pscustomobject]@{ processId = [int]$result.ProcessId; returnValue = [int]$result.ReturnValue } | ConvertTo-Json -Compress }",
+    Buffer.from(commandLine, "utf8").toString("base64"),
+    Buffer.from(currentDirectory, "utf8").toString("base64"),
+  ];
+}
+
+async function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+}
+
+async function openWindowsRuntimeLaunchPipe(environment: NodeJS.ProcessEnv): Promise<{
+  close: () => Promise<void>;
+  delivered: Promise<void>;
+  path: string;
+}> {
+  const path = `\\\\.\\pipe\\open-design-codex-${opaqueId("runtime")}`;
+  const payload = JSON.stringify(Object.fromEntries(
+    Object.entries(environment).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
+  ));
+  const server = createServer();
+  let connected = false;
+  let resolveDelivery!: () => void;
+  let rejectDelivery!: (error: Error) => void;
+  const delivered = new Promise<void>((resolve, reject) => {
+    resolveDelivery = resolve;
+    rejectDelivery = reject;
+  });
+  server.on("connection", (socket) => {
+    if (connected) {
+      socket.destroy();
+      return;
+    }
+    connected = true;
+    socket.once("error", rejectDelivery);
+    socket.end(payload, () => resolveDelivery());
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    const onError = (error: Error) => rejectListen(error);
+    server.once("error", onError);
+    server.listen(path, () => {
+      server.off("error", onError);
+      resolveListen();
+    });
+  });
+  return {
+    close: async () => await closeServer(server),
+    delivered,
+    path,
+  };
+}
+
+async function launchWindowsBreakawayRuntime(options: {
+  cwd: string;
+  entryPath: string;
+  environment: NodeJS.ProcessEnv;
+}): Promise<RuntimeProcessHandle> {
+  const launchPipe = await openWindowsRuntimeLaunchPipe(options.environment);
+  let pid: number | null = null;
+  try {
+    const commandLine = [
+      process.execPath,
+      options.entryPath,
+      "--launch-pipe",
+      launchPipe.path,
+    ].map(quoteWindowsCommandLineArgument).join(" ");
+    const stdout = await runCommand(
+      "powershell.exe",
+      windowsRuntimeProcessCreateArgs(commandLine, options.cwd),
+      "RUNTIME_SPAWN_FAILED",
+    );
+    const result = JSON.parse(stdout) as {
+      processId?: unknown;
+      returnValue?: unknown;
+    };
+    if (
+      result.returnValue !== 0
+      || !Number.isSafeInteger(result.processId)
+      || (result.processId as number) <= 0
+    ) {
+      throw new CodexPluginLauncherError(
+        "RUNTIME_SPAWN_FAILED",
+        `Win32_Process.Create failed with return value ${String(result.returnValue)}`,
+      );
+    }
+    pid = result.processId as number;
+    await Promise.race([
+      launchPipe.delivered,
+      sleep(10_000).then(() => {
+        throw new CodexPluginLauncherError(
+          "RUNTIME_SPAWN_FAILED",
+          "Windows runtime did not connect to its private environment pipe",
+        );
+      }),
+    ]);
+    if (!isProcessAlive(pid)) {
+      throw new CodexPluginLauncherError(
+        "RUNTIME_EXITED_EARLY",
+        "Windows runtime exited before launch environment delivery completed",
+      );
+    }
+    return {
+      kill: (signal) => {
+        process.kill(pid!, signal);
+      },
+      pid,
+      unref: () => undefined,
+    };
+  } catch (error) {
+    if (pid != null && isProcessAlive(pid)) process.kill(pid, "SIGKILL");
+    throw error;
+  } finally {
+    await launchPipe.close();
+  }
+}
+
+async function launchRuntimeProcess(options: {
+  cwd: string;
+  entryPath: string;
+  environment: NodeJS.ProcessEnv;
+  useWindowsBreakaway: boolean;
+}): Promise<RuntimeProcessHandle> {
+  if (process.platform === "win32" && options.useWindowsBreakaway) {
+    return await launchWindowsBreakawayRuntime(options);
+  }
+  const child = spawn(
+    spawnFilesystemPath(process.execPath),
+    [options.entryPath],
+    {
+      cwd: spawnFilesystemPath(options.cwd),
+      detached: true,
+      env: options.environment,
+      stdio: "ignore",
+      windowsHide: true,
+    },
+  );
+  await new Promise<void>((resolveSpawn, rejectSpawn) => {
+    child.once("error", rejectSpawn);
+    child.once("spawn", resolveSpawn);
+  });
+  if (child.pid == null) {
+    throw new CodexPluginLauncherError(
+      "RUNTIME_SPAWN_FAILED",
+      "runtime process did not expose a pid after spawn",
+    );
+  }
+  return {
+    kill: (signal) => {
+      child.kill(signal);
+    },
+    pid: child.pid,
+    unref: () => child.unref(),
+  };
 }
 
 async function extractRuntimeArchive(
@@ -459,15 +665,14 @@ async function extractRuntimeArchive(
     return;
   }
   if (process.platform === "win32") {
-    await runCommand("powershell.exe", [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
+    const invocation = windowsRuntimeArchiveExtractionInvocation(
       archivePath,
       payloadRoot,
-    ]);
+    );
+    await runCommand(
+      invocation.command,
+      invocation.args,
+    );
     return;
   }
   throw new CodexPluginLauncherError(
@@ -627,45 +832,30 @@ async function readCompatibleActiveRuntime(options: {
 
 async function waitForRuntimeReady(
   path: string,
-  child: ChildProcess,
+  child: RuntimeProcessHandle,
   timeoutMs: number,
 ): Promise<ReturnType<typeof parseCodexPluginRuntimeReady>> {
-  const spawnFailure: { error: Error | null } = { error: null };
-  const onSpawnError = (error: Error) => {
-    spawnFailure.error = error;
-  };
-  child.once("error", onSpawnError);
   const startedAt = Date.now();
-  try {
-    while (Date.now() - startedAt < timeoutMs) {
-      const raw = await readJsonIfExists(path);
-      if (raw != null) return parseCodexPluginRuntimeReady(raw);
-      if (spawnFailure.error != null) {
-        throw new CodexPluginLauncherError(
-          "RUNTIME_SPAWN_FAILED",
-          `runtime process failed to spawn: ${spawnFailure.error.message}`,
-        );
-      }
-      if (child.pid == null || !isProcessAlive(child.pid)) {
-        throw new CodexPluginLauncherError(
-          "RUNTIME_EXITED_EARLY",
-          "runtime exited before writing its ready handoff",
-        );
-      }
-      await sleep(50);
+  while (Date.now() - startedAt < timeoutMs) {
+    const raw = await readJsonIfExists(path);
+    if (raw != null) return parseCodexPluginRuntimeReady(raw);
+    if (!isProcessAlive(child.pid)) {
+      throw new CodexPluginLauncherError(
+        "RUNTIME_EXITED_EARLY",
+        "runtime exited before writing its ready handoff",
+      );
     }
-    throw new CodexPluginLauncherError(
-      "RUNTIME_READY_TIMEOUT",
-      `runtime did not become ready within ${timeoutMs}ms`,
-    );
-  } finally {
-    child.off("error", onSpawnError);
+    await sleep(50);
   }
+  throw new CodexPluginLauncherError(
+    "RUNTIME_READY_TIMEOUT",
+    `runtime did not become ready within ${timeoutMs}ms`,
+  );
 }
 
-async function stopFailedRuntime(child: ChildProcess): Promise<void> {
+async function stopFailedRuntime(child: RuntimeProcessHandle): Promise<void> {
   const pid = child.pid;
-  if (pid == null || !isProcessAlive(pid)) return;
+  if (!isProcessAlive(pid)) return;
   child.kill("SIGTERM");
   const startedAt = Date.now();
   while (isProcessAlive(pid) && Date.now() - startedAt < 5_000) {
@@ -1162,9 +1352,12 @@ export class CodexPluginRuntimeLauncher {
       };
     }
     const lease = acquisition.lease;
-    let child: ChildProcess | null = null;
+    let child: RuntimeProcessHandle | null = null;
     const handoffId = opaqueId("handoff");
     const resumeToken = randomBytes(32).toString("base64url");
+    const accessToken = expected.protocolVersion >= 2
+      ? randomBytes(32).toString("base64url")
+      : null;
     const handoffPath = join(shellPaths.handoffsRoot, `${handoffId}.json`);
     const readyPath = join(shellPaths.handoffsRoot, `${handoffId}.ready.json`);
     const createdAt = new Date().toISOString();
@@ -1238,30 +1431,29 @@ export class CodexPluginRuntimeLauncher {
       });
       await writeJsonAtomic(handoffPath, handoff);
 
-      child = spawn(
-        spawnFilesystemPath(process.execPath),
-        [acquired.entryPath],
-        {
-          cwd: spawnFilesystemPath(dirname(acquired.entryPath)),
-          detached: true,
-          env: {
-            ...process.env,
-            [CODEX_PLUGIN_RUNTIME_ENV.CHANNEL]: expected.channel,
-            [CODEX_PLUGIN_RUNTIME_ENV.DATA_ROOT]: this.suitePaths.dataRoot,
-            [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_ID]: handoffId,
-            [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_TOKEN]: resumeToken,
-            [CODEX_PLUGIN_RUNTIME_ENV.LOGS_ROOT]: this.suitePaths.logsRoot,
-            [CODEX_PLUGIN_RUNTIME_ENV.NAMESPACE]: expected.namespace,
-            [CODEX_PLUGIN_RUNTIME_ENV.PROTOCOL_VERSION]:
-              expected.protocolVersion.toString(),
-            [CODEX_PLUGIN_RUNTIME_ENV.READY_PATH]: readyPath,
-            [CODEX_PLUGIN_RUNTIME_ENV.RUNTIME_DIGEST]: expected.runtimeDigest,
-            [CODEX_PLUGIN_RUNTIME_ENV.RUNTIME_VERSION]: expected.runtimeVersion,
-          },
-          stdio: "ignore",
-          windowsHide: true,
+      child = await launchRuntimeProcess({
+        cwd: dirname(acquired.entryPath),
+        entryPath: acquired.entryPath,
+        environment: {
+          ...process.env,
+          ...(accessToken == null
+            ? {}
+            : { [CODEX_PLUGIN_RUNTIME_ENV.ACCESS_TOKEN]: accessToken }),
+          [CODEX_PLUGIN_RUNTIME_ENV.CHANNEL]: expected.channel,
+          [CODEX_PLUGIN_RUNTIME_ENV.DATA_ROOT]: this.suitePaths.dataRoot,
+          [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_ID]: handoffId,
+          [CODEX_PLUGIN_RUNTIME_ENV.HANDOFF_TOKEN]: resumeToken,
+          [CODEX_PLUGIN_RUNTIME_ENV.LOGS_ROOT]: this.suitePaths.logsRoot,
+          [CODEX_PLUGIN_RUNTIME_ENV.NAMESPACE]: expected.namespace,
+          [CODEX_PLUGIN_RUNTIME_ENV.PROTOCOL_VERSION]:
+            expected.protocolVersion.toString(),
+          [CODEX_PLUGIN_RUNTIME_ENV.READY_PATH]: readyPath,
+          [CODEX_PLUGIN_RUNTIME_ENV.RUNTIME_DIGEST]: expected.runtimeDigest,
+          [CODEX_PLUGIN_RUNTIME_ENV.RUNTIME_VERSION]: expected.runtimeVersion,
         },
-      );
+        useWindowsBreakaway:
+          manifest.artifact.mediaType === CODEX_PLUGIN_RUNTIME_MEDIA_TYPES.ZIP_V1,
+      });
       const ready = await waitForRuntimeReady(
         readyPath,
         child,
@@ -1333,6 +1525,15 @@ export class CodexPluginRuntimeLauncher {
         startedAt: now,
         updatedAt: now,
       };
+      if (accessToken == null) {
+        await rm(shellPaths.accessPath, { force: true });
+      } else {
+        await writeJsonAtomic(shellPaths.accessPath, {
+          ...expected,
+          accessToken,
+          schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+        });
+      }
       await writeJsonAtomic(storePaths.bindingPath, binding);
       await writeJsonAtomic(storePaths.activePath, pointer);
       if (armAttempt) await rm(storePaths.attemptPath, { force: true });

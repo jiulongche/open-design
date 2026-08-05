@@ -35,6 +35,9 @@ import {
 } from "@open-design/distribution-proto";
 
 import {
+  assertToolCodexAuthNotClonedFromDefault,
+} from "./auth.js";
+import {
   ToolCodexError,
   acquireToolCodexGlobalLock,
   readToolCodexSentinel,
@@ -379,9 +382,26 @@ type CodexPluginMcpLaunch = {
   command: string;
   commandEntry: string;
   startupTimeoutMs: number;
+  toolTimeoutMs: number;
 };
 
 export const WINDOWS_CODEX_PLUGIN_COMMAND_MAX_PATH_LENGTH = 259;
+export const CODEX_PLUGIN_TOOL_TIMEOUT_MAX_SECONDS = 300;
+
+export function parseCodexPluginToolTimeoutMs(value: unknown): number {
+  if (
+    typeof value !== "number"
+    || !Number.isFinite(value)
+    || value <= 0
+    || value > CODEX_PLUGIN_TOOL_TIMEOUT_MAX_SECONDS
+  ) {
+    throw new ToolCodexError(
+      "MCP_MANIFEST_INVALID",
+      `Codex plugin MCP manifest must declare a positive tool timeout at most ${CODEX_PLUGIN_TOOL_TIMEOUT_MAX_SECONDS} seconds`,
+    );
+  }
+  return value * 1_000;
+}
 
 export function assertCodexPluginCacheCommandPathSupported(options: {
   codexHome: string;
@@ -449,6 +469,7 @@ async function readCodexPluginMcpLaunch(
         command?: unknown;
         cwd?: unknown;
         startup_timeout_sec?: unknown;
+        tool_timeout_sec?: unknown;
       };
     };
   }).mcpServers?.["open-design"];
@@ -470,6 +491,7 @@ async function readCodexPluginMcpLaunch(
   const commandEntry = normalizeDistributionInventoryPath(
     server.command.slice(2),
   );
+  const toolTimeoutMs = parseCodexPluginToolTimeoutMs(server.tool_timeout_sec);
   if (!buildReport.artifact.files.includes(commandEntry)) {
     throw new ToolCodexError(
       "MCP_COMMAND_NOT_IN_ARTIFACT",
@@ -481,6 +503,7 @@ async function readCodexPluginMcpLaunch(
     command: join(buildReport.paths.shellRoot, ...commandEntry.split("/")),
     commandEntry,
     startupTimeoutMs: server.startup_timeout_sec * 1_000,
+    toolTimeoutMs,
   };
 }
 
@@ -565,6 +588,9 @@ export async function prepareToolCodexPlugin(options: {
   codexBin?: string;
   paths: ToolCodexPaths;
 }): Promise<ToolCodexPrepareResult> {
+  await assertToolCodexAuthNotClonedFromDefault({
+    managedCodexHome: options.paths.codexHome,
+  });
   const buildReportPath = resolve(options.buildReportPath);
   const buildReport = parseDistributionBuildReport(await readJson(buildReportPath));
   await verifyToolCodexArtifact(buildReport);
@@ -730,7 +756,7 @@ async function probeStdio(
     const result = await client.callTool({
       arguments: {},
       name: "get_open_design_status",
-    });
+    }, undefined, { timeout: launch.toolTimeoutMs });
     const status = result.structuredContent;
     if (status == null || typeof status !== "object" || !("identity" in status)) {
       throw new Error("Codex plugin status tool did not return an identity");
@@ -743,7 +769,7 @@ async function probeStdio(
     const runtime = await client.callTool({
       arguments: {},
       name: "ensure_open_design_runtime",
-    });
+    }, undefined, { timeout: launch.toolTimeoutMs });
     if (
       runtime.structuredContent == null
       || typeof runtime.structuredContent !== "object"

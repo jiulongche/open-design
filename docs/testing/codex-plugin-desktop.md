@@ -65,7 +65,7 @@ pnpm tools-pack codex-plugin build \
   --platform win32-x64 \
   --carrier-path <node-24-executable> \
   --runtime-version 0.16.1 \
-  --protocol-version 1 \
+  --protocol-version 2 \
   --json
 ```
 
@@ -87,6 +87,11 @@ published independently from the marketplace shell. The default fixture mode
 remains available for cheap protocol tests. `artifact.files` includes the
 platform carrier and excludes the generated `distribution.json`; the identity
 binds its digest as `shellDigest`.
+
+The Windows shell also bundles the matching 7-Zip extractor. Production
+runtime startup uses a private named-pipe environment handoff and creates the
+runtime outside the ephemeral Codex CLI process job, so a confirmed runtime
+can remain available after `codex exec` exits.
 
 ## Offline shell gate
 
@@ -162,6 +167,15 @@ runtime lifecycle with:
 - a loopback `tools-serve` Codex plugin fixture;
 - real `codex --enable plugins exec --json` calls to
   `ensure_open_design_runtime`.
+
+Immediately before every real CLI acceptance call, run:
+
+```bash
+pnpm tools-codex auth-check --namespace <environment-namespace> --json
+```
+
+This no-network preflight requires a managed login and rejects a credential
+file copied or linked from the default Codex home.
 
 The fixture's programmatic or loopback HTTP promotion keeps the same
 `runtimeManifestUrl`, loads and validates the next build report before
@@ -246,8 +260,8 @@ pnpm tools-release publish-codex-plugin
 
 Immutable runtime uploads refuse replacement. `latest` uses conditional writes
 and refuses rollback or a same-version digest change. `release-beta` builds and
-plans this payload on every macOS arm64 run, publishing it only when the
-workflow's existing `publish` input is true.
+plans this payload on the native macOS arm64 and Windows x64 jobs, publishing
+it only when the workflow's existing `publish` input is true.
 
 ## Managed acceptance environment
 
@@ -284,6 +298,15 @@ Windows controlled start requires a ChatGPT login in the managed home:
 $env:CODEX_HOME = "$HOME\\.od\\tools-codex\\desktop-smoke\\codex-home"
 codex login
 ```
+
+The managed home must receive its own login. Never copy, hard-link, or
+symlink `auth.json` from the default Codex home: ChatGPT OAuth refresh tokens
+rotate, and concurrent reuse can invalidate the source session. For cleanup,
+use `tools-codex clean --layer credentials` to remove only the managed auth
+file instead of treating a personal credential as disposable test data.
+
+Run `tools-codex auth-check --namespace desktop-smoke --json` after login and
+before any real CLI or Desktop acceptance call.
 
 `tools-codex start` fails with `DESKTOP_LOGIN_REQUIRED` before opening
 Desktop when this precondition is missing.

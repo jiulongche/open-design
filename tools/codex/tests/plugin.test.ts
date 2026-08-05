@@ -11,11 +11,13 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  CODEX_PLUGIN_TOOL_TIMEOUT_MAX_SECONDS,
   WINDOWS_CODEX_PLUGIN_COMMAND_MAX_PATH_LENGTH,
   assertCodexPluginCacheCommandPathSupported,
   classifyToolCodexAcceptance,
   currentIdentityFromStdioObservation,
   inspectToolCodexDesktopScreenshot,
+  parseCodexPluginToolTimeoutMs,
   parseToolCodexDesktopUiObservation,
   verifyToolCodexArtifact,
   type ToolCodexAcceptanceSignals,
@@ -79,6 +81,16 @@ const SIGNALS: ToolCodexAcceptanceSignals = {
 };
 
 describe("tools-codex acceptance", () => {
+  it("honors the MCP manifest tool timeout for production cold starts", () => {
+    expect(parseCodexPluginToolTimeoutMs(120)).toBe(120_000);
+    expect(() => parseCodexPluginToolTimeoutMs(0)).toThrowError(
+      expect.objectContaining({ code: "MCP_MANIFEST_INVALID" }),
+    );
+    expect(() => parseCodexPluginToolTimeoutMs(
+      CODEX_PLUGIN_TOOL_TIMEOUT_MAX_SECONDS + 1,
+    )).toThrowError(expect.objectContaining({ code: "MCP_MANIFEST_INVALID" }));
+  });
+
   it("uses the selected runtime identity without changing shell fields", () => {
     const fallback = {
       channel: "beta",

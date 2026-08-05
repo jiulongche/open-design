@@ -21,6 +21,7 @@ import {
   codexMarketplaceName,
   packCodexPlugin,
 } from "../src/codex-plugin.js";
+import { resolveCodexProductionRuntimeArchiveInvocation } from "../src/codex-runtime.js";
 
 const roots: string[] = [];
 const platformIt = (
@@ -91,6 +92,51 @@ async function createWorkspace(): Promise<string> {
 }
 
 describe("tools-pack codex-plugin", () => {
+  it("defaults new plugin shells to protocol v2", async () => {
+    const workspaceRoot = await createWorkspace();
+    const report = await packCodexPlugin({
+      carrierPath: process.execPath,
+      channel: "stable",
+      dir: join(workspaceRoot, "tool-root"),
+      namespace: "protocol-default",
+      platform: currentTarget(),
+      runtimeVersion: "2.0.0",
+      skipAppBuild: true,
+      workspaceRoot,
+    });
+
+    expect(report.identity.protocolVersion).toBe(2);
+  });
+
+  it("selects target-native production runtime ZIP tools", () => {
+    expect(resolveCodexProductionRuntimeArchiveInvocation({
+      arch: "arm64",
+      artifactPath: "/tmp/runtime.zip",
+      platform: "darwin",
+    })).toEqual({
+      args: ["-c", "-k", "--sequesterRsrc", "--rsrc", ".", "/tmp/runtime.zip"],
+      command: "ditto",
+    });
+    const windows = resolveCodexProductionRuntimeArchiveInvocation({
+      arch: "x64",
+      artifactPath: "C:\\runtime.zip",
+      platform: "win32",
+    });
+    expect(windows.command).toMatch(/[\\/]resources[\\/]win[\\/]7zip[\\/]7z\.exe$/u);
+    expect(windows.args).toEqual([
+      "a",
+      "-tzip",
+      "-mx=5",
+      "C:\\runtime.zip",
+      ".\\*",
+    ]);
+    expect(() => resolveCodexProductionRuntimeArchiveInvocation({
+      arch: "arm64",
+      artifactPath: "C:\\runtime.zip",
+      platform: "win32",
+    })).toThrow(/requires darwin-arm64 or win32-x64/u);
+  });
+
   it("derives valid, distinct marketplace names from dotted namespaces", () => {
     expect(codexMarketplaceName(
       "team.preview",
@@ -137,6 +183,13 @@ describe("tools-pack codex-plugin", () => {
     expect(report.artifact.files).toEqual([...report.artifact.files].sort());
     expect(report.artifact.files).toContain("mcp/server.mjs");
     expect(report.artifact.files).toContain(carrierEntry(target));
+    if (target === CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64) {
+      expect(report.artifact.files).toEqual(expect.arrayContaining([
+        "bin/7zip/7z.dll",
+        "bin/7zip/7z.exe",
+        "bin/7zip/License.txt",
+      ]));
+    }
     expect(report.artifact.files).not.toContain("bootstrap.sh");
     expect(report.artifact.files).not.toContain("distribution.json");
     expect((await stat(join(report.paths.shellRoot, "distribution.json"))).isFile()).toBe(true);
@@ -294,6 +347,11 @@ describe("tools-pack codex-plugin", () => {
     expect(source).toContain("/api/ready");
     expect(source).toContain("@open-design\", \"daemon\", \"dist\", \"mcp.js");
     expect(source).toContain('requestUrl.pathname !== "/mcp"');
+    expect(source).toContain('request.headers.authorization');
+    expect(source).toContain('parseCodexPluginMcpEnvelope');
+    expect(source).toContain('createMcpGatewaySession');
+    expect(source).toContain('process.argv.indexOf("--launch-pipe")');
+    expect(source).toContain('connect(launchPipePath)');
     expect(source).toContain('message.method === "tools/call"');
     expect(source).toContain('message.method === "resources/read"');
     expect(source).not.toContain("packedRuntimeVersion");

@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 
 import { cac } from "cac";
 
+import { verifyToolCodexManagedAuth } from "./auth.js";
 import {
   TOOLS_CODEX_CLEAN_LAYERS,
   cleanToolCodexEnvironment,
@@ -169,6 +170,14 @@ common(cli.command("status", "Inspect managed state and fail-closed Codex Deskto
       appPath: options.appPath,
       codexBin: options.codexBin,
       paths: pathsFor(options),
+    }), options);
+  });
+
+common(cli.command("auth-check", "Verify managed Codex auth is independent from the default home"))
+  .action(async (options: CommonOptions) => {
+    const paths = pathsFor(options);
+    printResult(await verifyToolCodexManagedAuth({
+      managedCodexHome: paths.codexHome,
     }), options);
   });
 

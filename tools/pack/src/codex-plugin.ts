@@ -40,6 +40,7 @@ import {
   buildCodexProductionRuntime,
   codexProductionRuntimeSource,
 } from "./codex-runtime.js";
+import { winResources } from "./resources.js";
 
 export type CodexPluginBuildOptions = {
   carrierPath?: string;
@@ -57,7 +58,7 @@ export type CodexPluginBuildOptions = {
 };
 
 const DEFAULT_NAMESPACE = "codex-local";
-const DEFAULT_PROTOCOL_VERSION = 1;
+const DEFAULT_PROTOCOL_VERSION = 2;
 const RUNTIME_ENTRY_PATH = "runtime.mjs";
 const RUNTIME_ARCHIVE_PATH = "runtime.zip";
 const MCP_STARTUP_TIMEOUT_SECONDS = 10;
@@ -234,6 +235,13 @@ async function packCodexPluginCarrier(options: {
   await mkdir(dirname(targetPath), { recursive: true });
   await cp(sourcePath, targetPath);
   await chmod(targetPath, 0o700);
+  if (options.target === CODEX_PLUGIN_PLATFORM_TARGETS.WIN32_X64) {
+    await cp(
+      dirname(winResources.sevenZipExe),
+      join(options.shellRoot, "bin", "7zip"),
+      { recursive: true },
+    );
+  }
   return { entryPath, version };
 }
 

@@ -15,6 +15,7 @@ import {
   type StopProcessesResult,
 } from "@open-design/platform";
 
+import { assertToolCodexAuthNotClonedFromDefault } from "./auth.js";
 import {
   TOOLS_CODEX_OWNER,
   TOOLS_CODEX_SCHEMA_VERSION,
@@ -1524,6 +1525,9 @@ export async function startToolCodexDesktop(options: {
     );
   }
   await readToolCodexSentinel(options.paths);
+  await assertToolCodexAuthNotClonedFromDefault({
+    managedCodexHome: options.paths.codexHome,
+  });
   const lock = await acquireToolCodexGlobalLock(options.paths, "start");
   try {
     const runtimeBinding = runtimeBindingFromPreparedState(

@@ -122,7 +122,7 @@ pnpm tools-pack codex-plugin build \
   --platform win32-x64 \
   --carrier-path <node-24-executable> \
   --runtime-version 0.16.1 \
-  --protocol-version 1 \
+  --protocol-version 2 \
   --json
 ```
 
@@ -188,6 +188,19 @@ Before Windows start, authenticate the managed home with ChatGPT:
 ```powershell
 $env:CODEX_HOME = "<state-root>\\desktop-smoke\\codex-home"
 codex login
+```
+
+Never copy or link an existing `auth.json` into the managed home. Codex owns
+rotating ChatGPT OAuth refresh tokens; reusing one credential file across two
+homes can invalidate the source login. Run an independent `codex login` with
+the managed `CODEX_HOME`. Remove managed credentials with
+`tools-codex clean --layer credentials`, which deletes only the managed file;
+do not use a copied personal credential as acceptance-fixture material.
+Before any real `codex exec` acceptance call, require the no-network credential
+isolation preflight:
+
+```powershell
+pnpm tools-codex auth-check --namespace desktop-smoke --json
 ```
 
 On a supported controlled host:

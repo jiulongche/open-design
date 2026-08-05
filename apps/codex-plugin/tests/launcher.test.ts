@@ -24,6 +24,8 @@ import {
   CODEX_PLUGIN_RUNTIME_OBSERVER_TIMEOUT_MS,
   CODEX_PLUGIN_RUNTIME_READY_TIMEOUT_MS,
   CodexPluginRuntimeLauncher,
+  windowsRuntimeArchiveExtractionInvocation,
+  windowsRuntimeProcessCreateArgs,
 } from "../src/launcher.js";
 
 const runtimeLeasePollControl = vi.hoisted(() => ({
@@ -74,6 +76,99 @@ afterEach(async () => {
 });
 
 describe("Codex plugin runtime launcher", () => {
+  it("uses the bundled Windows 7-Zip extractor", () => {
+    expect(windowsRuntimeArchiveExtractionInvocation(
+      "C:\\runtime archive.zip",
+      "C:\\runtime payload",
+      "C:\\plugin\\bin\\node.exe",
+    )).toEqual({
+      args: [
+        "x",
+        "-y",
+        "-oC:\\runtime payload",
+        "C:\\runtime archive.zip",
+      ],
+      command: "C:\\plugin\\bin\\7zip\\7z.exe",
+    });
+  });
+
+  it("creates production runtimes outside the Codex Windows process job", () => {
+    const commandLine =
+      '"C:\\plugin\\bin\\node.exe" "C:\\runtime payload\\runtime.mjs"';
+    const currentDirectory = "C:\\runtime payload";
+    expect(windowsRuntimeProcessCreateArgs(commandLine, currentDirectory)).toEqual([
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "& { param($commandLineBase64, $currentDirectoryBase64) $commandLine = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($commandLineBase64)); $currentDirectory = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($currentDirectoryBase64)); $result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine; CurrentDirectory = $currentDirectory }; [pscustomobject]@{ processId = [int]$result.ProcessId; returnValue = [int]$result.ReturnValue } | ConvertTo-Json -Compress }",
+      Buffer.from(commandLine, "utf8").toString("base64"),
+      Buffer.from(currentDirectory, "utf8").toString("base64"),
+    ]);
+  });
+
+  it("reads protocol-v2 access only from matching private runtime state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "od-codex-runtime-access-"));
+    roots.push(root);
+    const suitePaths = resolveCodexPluginSuitePaths(
+      resolveDistributionSuitePaths({
+        channel: "beta",
+        namespace: "release-beta",
+        namespaceBaseRoot: join(root, "namespaces"),
+      }),
+    );
+    const runtimeDigest = `sha256:${"a".repeat(64)}`;
+    const identity = {
+      channel: "beta" as const,
+      namespace: "release-beta",
+      protocolVersion: 2,
+      runtimeDigest,
+      runtimeVersion: "1.2.3-beta.4",
+      shellDigest: `sha256:${"b".repeat(64)}`,
+      shellType: "codex-plugin" as const,
+      shellVersion: "0.2.0",
+    };
+    const launcher = new CodexPluginRuntimeLauncher({
+      fetchImpl: vi.fn<typeof fetch>(),
+      identity,
+      manifestUrl: "http://127.0.0.1:17456/manifest.json",
+      shellVersion: identity.shellVersion,
+      suitePaths,
+    });
+    const accessPath = resolveCodexPluginShellPaths(suitePaths).accessPath;
+    await mkdir(dirname(accessPath), { recursive: true });
+    await writeFile(accessPath, JSON.stringify({
+      accessToken: "a".repeat(43),
+      channel: identity.channel,
+      namespace: identity.namespace,
+      protocolVersion: identity.protocolVersion,
+      runtimeDigest,
+      runtimeVersion: identity.runtimeVersion,
+      schemaVersion: CODEX_PLUGIN_PROTOCOL_SCHEMA_VERSION,
+    }), { mode: 0o600 });
+    const binding = {
+      channel: identity.channel,
+      endpointUrl: "http://127.0.0.1:17456/status",
+      generation: 0,
+      namespace: identity.namespace,
+      owner: { pid: process.pid, shellType: "codex-plugin" as const },
+      protocolVersion: identity.protocolVersion,
+      runtimeDigest,
+      runtimeVersion: identity.runtimeVersion,
+      schemaVersion: 1 as const,
+      startedAt: "2026-08-04T00:00:00.000Z",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+    };
+
+    await expect(launcher.readRuntimeAccessToken(binding)).resolves.toBe(
+      "a".repeat(43),
+    );
+    await expect(launcher.readRuntimeAccessToken({
+      ...binding,
+      runtimeDigest: `sha256:${"c".repeat(64)}`,
+    })).rejects.toThrow("runtime identity mismatch");
+  });
+
   it("acquires one immutable runtime, confirms handoff, and reattaches", async () => {
     const root = await mkdtemp(join(tmpdir(), "od-codex-runtime-launcher-"));
     roots.push(root);
