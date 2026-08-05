@@ -720,6 +720,7 @@ jobs:
         with:
           name: open-design-beta-codex-darwin-arm64-acceptance
           path: ${{ runner.temp }}/codex-plugin-tools-pack/out/codex-plugin/namespaces/release-beta/darwin-arm64
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
@@ -1338,6 +1339,7 @@ jobs:
         with:
           name: open-design-beta-codex-win32-x64-acceptance
           path: ${{ runner.temp }}\codex-plugin-tools-pack\out\codex-plugin\namespaces\release-beta\win32-x64
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
