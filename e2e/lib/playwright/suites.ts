@@ -53,12 +53,10 @@ export const uiP0Groups = {
   "project-workspace-collab": {
     grep: String.raw`\[P0\]`,
     workers: 1,
-    files: ["ui/workspace-multi-client-collab.test.ts"],
-  },
-  "project-workspace-team-sync": {
-    grep: String.raw`\[P0\]`,
-    workers: 1,
-    files: ["ui/workspace-team-design-system-picker.test.ts"],
+    files: [
+      "ui/workspace-multi-client-collab.test.ts",
+      "ui/workspace-team-design-system-picker.test.ts",
+    ],
   },
   "project-runtime": {
     grep: String.raw`\[P0\]`,
@@ -78,7 +76,6 @@ export const uiP0CiMatrix = [
   { name: "entry-settings", shard: "entry-settings" },
   { name: "project-workspace-core", shard: "project-workspace-core" },
   { name: "project-workspace-collab", shard: "project-workspace-collab" },
-  { name: "project-workspace-team-sync", shard: "project-workspace-team-sync" },
   { name: "project-runtime", shard: "project-runtime" },
   { name: "workspace-restoration", shard: "workspace-restoration" },
 ] as const satisfies readonly UiP0CiMatrixEntry[];

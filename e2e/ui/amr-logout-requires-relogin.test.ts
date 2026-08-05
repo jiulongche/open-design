@@ -152,7 +152,22 @@ test('[P0] after local Sign out, AMR runs require re-login and Settings keeps AM
   await page.evaluate((next) => {
     window.localStorage.setItem('open-design:config', JSON.stringify(next));
   }, reloginConfig);
+  const projectScopeResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'GET'
+      && url.pathname === `/api/projects/${projectId}/workspace-scope`;
+  });
   await gotoProject(page, projectId);
+  const scopeResponse = await projectScopeResponse;
+  expect(scopeResponse.ok(), await scopeResponse.text()).toBeTruthy();
+  const scopeBody = (await scopeResponse.json()) as {
+    scope?: { kind?: string; projectId?: string };
+  };
+  expect(scopeBody.scope).toMatchObject({ kind: 'personal', projectId });
+  // The composer is visible while Workspace authority is still resolving, but
+  // intentionally read-only in that fail-closed window. Wait on the actual
+  // writer gate so a stale scope cannot turn into a test-wide click timeout.
+  await expect(page.getByTestId('chat-composer-input')).toBeEditable({ timeout: T.medium });
   await sendPrompt(page, 'AMR logout should require relogin');
 
   const balanceGate = page.getByTestId('amr-balance-dialog');

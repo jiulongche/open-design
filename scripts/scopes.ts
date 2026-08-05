@@ -75,7 +75,6 @@ const DAEMON_RUNTIME_DEFINITION_MATRIX_NAMES = [
   "entry-settings",
   "project-workspace-core",
   "project-workspace-collab",
-  "project-workspace-team-sync",
   "project-runtime",
 ] as const;
 

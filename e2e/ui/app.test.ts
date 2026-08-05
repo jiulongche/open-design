@@ -1532,7 +1532,6 @@ async function runFileUploadSendFlow(
   await expect((await uploadResponse).ok()).toBeTruthy();
 
   await expect(stagedAttachmentName(page, 'reference.txt')).toBeVisible();
-  await expect(page.getByText('reference.txt', { exact: true })).toBeVisible();
 
   await sendPrompt(page, entry.prompt);
   await expect(page.locator('.msg.user').getByText(entry.prompt, { exact: true })).toBeVisible();

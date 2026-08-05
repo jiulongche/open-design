@@ -919,7 +919,7 @@ test("merge-queue threshold escalates medium-confidence files to the full radius
   });
 });
 
-test("runtime-definition changes produce only a five-shard UI P0 shadow candidate", async () => {
+test("runtime-definition changes produce only a four-shard UI P0 shadow candidate", async () => {
   const { evaluateUiP0Shadow } = await import("../../../scripts/scopes.ts");
   const decision = evaluateUiP0Shadow([
     "apps/daemon/src/runtimes/defs/atomcode.ts",
@@ -934,7 +934,6 @@ test("runtime-definition changes produce only a five-shard UI P0 shadow candidat
       "entry-settings",
       "project-workspace-core",
       "project-workspace-collab",
-      "project-workspace-team-sync",
       "project-runtime",
     ],
   );
@@ -957,7 +956,6 @@ test("runtime-definition shadow fails closed for mixed, unknown, empty, and unre
         "entry-settings",
         "project-workspace-core",
         "project-workspace-collab",
-        "project-workspace-team-sync",
         "project-runtime",
         "workspace-restoration",
       ],
@@ -1014,7 +1012,6 @@ test("plan trace reports the runtime-definition UI P0 shadow without changing th
       "entry-settings",
       "project-workspace-core",
       "project-workspace-collab",
-      "project-workspace-team-sync",
       "project-runtime",
     ],
   );
