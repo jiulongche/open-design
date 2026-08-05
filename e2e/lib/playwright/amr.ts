@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
 import type {
+  ProjectWorkspaceScopeResponse,
   WorkspaceCollabContext,
   WorkspaceDirectoryItem,
 } from '@open-design/contracts';
@@ -244,7 +245,11 @@ export async function expectWorkspaceReady(page: Page) {
   await waitForLoadingToClear(page);
   await expect(page).toHaveURL(/\/projects\//);
   await expect(page.getByTestId('chat-composer')).toBeVisible();
-  await expect(page.getByTestId('chat-composer-input')).toBeVisible();
+  // ProjectView renders the composer while Workspace authority is still
+  // resolving, but keeps its editor read-only until the project scope proves
+  // that this viewer may write. Visibility alone therefore races the actual
+  // submit gate and can leave sendPrompt waiting on an opaque click timeout.
+  await expect(page.getByTestId('chat-composer-input')).toBeEditable({ timeout: T.medium });
 }
 
 /**
@@ -415,6 +420,13 @@ export async function createProjectViaApi(
 }
 
 export async function gotoProject(page: Page, projectId: string) {
+  // Arm this before navigation: the route bootstrap may resolve quickly enough
+  // that a waiter registered after page.goto would miss the only scope witness.
+  const projectScopeResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'GET'
+      && url.pathname === `/api/projects/${projectId}/workspace-scope`;
+  });
   try {
     await page.goto(`/projects/${projectId}`, { waitUntil: 'domcontentloaded' });
   } catch (error) {
@@ -422,6 +434,10 @@ export async function gotoProject(page: Page, projectId: string) {
     if (!/ERR_ABORTED|frame was detached/i.test(message)) throw error;
   }
   await dismissPrivacyDialog(page);
+  const scopeResponse = await projectScopeResponse;
+  const scopeBody = (await scopeResponse.json()) as ProjectWorkspaceScopeResponse;
+  expect(scopeResponse.ok(), JSON.stringify(scopeBody)).toBeTruthy();
+  expect(scopeBody.scope).toMatchObject({ kind: 'personal', projectId });
   await expectWorkspaceReady(page);
 }
 
