@@ -2718,11 +2718,23 @@
    width-fit scale letterboxes top/bottom with the card bg and never clips. */
 .home-hero__plugin-preset[data-od-mode="deck"] .plugins-home__html-iframe {
   position: absolute;
-  top: 50%;
-  left: 50%;
-  inset: auto;
+  /* Anchor with the `inset` shorthand ALONE — no `top`/`left` longhands beside
+     it. This rule previously carried `inset: auto` after `top: 50%; left: 50%`,
+     and since `inset` is the top/right/bottom/left shorthand it reset both back
+     to `auto`, dropping the iframe to its static position: for a 1280px box in
+     a ~206px flex frame that lands several hundred pixels outside the tile,
+     which the frame's `overflow: hidden` renders as an empty card. Ordering the
+     two correctly would also work, but stating the anchor once removes the
+     shorthand/longhand hazard instead of relying on the next editor to preserve
+     the order. */
+  inset: 50% auto auto 50%;
   width: 1280px;
   height: 720px;
+  /* The base `.plugins-home__html-iframe` rule sets `transform-origin: 0 0`,
+     but the -50%/-50% centering idiom is only correct about the element's
+     centre; inheriting the corner origin offsets the tile by half its
+     *unscaled* 1280x720. Restate the origin rather than rely on the base. */
+  transform-origin: 50% 50%;
   transform: translate(-50%, -50%) scale(var(--deck-preview-scale));
 }
 

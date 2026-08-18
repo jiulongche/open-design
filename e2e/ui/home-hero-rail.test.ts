@@ -150,6 +150,12 @@ const HOME_PLUGINS = [
       od: {
         kind: 'scenario',
         taskKind: 'new-generation',
+        // `mode` drives the card's `data-od-mode`, and an html preview is what
+        // puts a scaled iframe in the tile — both are needed for the deck
+        // preview-positioning spec below to exercise the deck override at all.
+        mode: 'deck',
+        surface: 'web',
+        preview: { type: 'html', entry: './example.html' },
         useCase: {
           query:
             'Create a {{deckType}} for {{audience}} about {{topic}} with {{slideCount}}. Speaker notes: {{speakerNotes}}. Use {{designSystem}}.',
@@ -1873,6 +1879,81 @@ test('[P1] home hero deck example preset updates the composer input', async ({ p
   await expect(input).toHaveText(
     'Create a pitch deck for decision makers about quarterly review with 10-15 pages. Speaker notes: include speaker notes. Use the active project design system.',
   );
+});
+
+test('[P1] home hero deck preview keeps its scaled slide inside the tile', async ({ page }) => {
+  // The deck override renders the slide at a fixed 1280x720 logical viewport
+  // and scales it down to the tile. Two ways of writing that rule have already
+  // gone wrong: an `inset` shorthand ordered after the `top`/`left` longhands
+  // reset the anchor, and a `transform-origin` inherited from the base rule
+  // offsets the box by half its *unscaled* size. Both put the iframe outside
+  // the tile, where `overflow: hidden` renders it as an empty card.
+  //
+  // Assert the two properties the rule exists to provide rather than the
+  // declarations that happen to provide them, so a different-but-correct
+  // anchoring still passes:
+  //   1. the scaled slide is inside its frame (not a blank card);
+  //   2. the leftover slack is split evenly, since the cell is taller than 16:9
+  //      and the rule's contract is to letterbox top/bottom (see the frame's
+  //      `align-items: center` and the comment above the override).
+  await page.route('**/api/plugins/example-simple-deck/preview*', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: '<!doctype html><html><body style="margin:0"><main style="width:1280px;height:720px">Deck preview</main></body></html>',
+    });
+  });
+
+  await gotoEntryHome(page);
+  await pickHomeTemplate(page, 'deck');
+  await expect(page.getByTestId('home-hero-plugin-presets')).toBeVisible();
+
+  const card = page.locator(
+    '[data-testid="home-hero-plugin-preset"][data-plugin-id="example-simple-deck"]',
+  );
+  await expect(card).toBeVisible();
+
+  const iframe = card.locator('.plugins-home__html-iframe');
+  await expect(iframe).toBeVisible();
+
+  const metrics = await iframe.evaluate((element) => {
+    const frame = element.closest('.plugins-home__html-frame');
+    if (!(frame instanceof HTMLElement)) throw new Error('Deck preview frame not found');
+    const slide = element.getBoundingClientRect();
+    const cell = frame.getBoundingClientRect();
+    return {
+      width: slide.width,
+      height: slide.height,
+      frameWidth: cell.width,
+      frameHeight: cell.height,
+      gapTop: slide.top - cell.top,
+      gapBottom: cell.bottom - slide.bottom,
+      gapLeft: slide.left - cell.left,
+      gapRight: cell.right - slide.right,
+    };
+  });
+
+  // A scale that collapsed to zero would satisfy every containment check below.
+  expect(metrics.width).toBeGreaterThan(0);
+  expect(metrics.height).toBeGreaterThan(0);
+
+  for (const [edge, gap] of Object.entries({
+    top: metrics.gapTop,
+    bottom: metrics.gapBottom,
+    left: metrics.gapLeft,
+    right: metrics.gapRight,
+  })) {
+    // Negative means the slide hangs off that edge and is clipped away.
+    expect(gap, `slide should not overhang the ${edge} edge (got ${gap}px)`).toBeGreaterThanOrEqual(
+      -1,
+    );
+  }
+
+  expect(
+    Math.abs(metrics.gapTop - metrics.gapBottom),
+    `letterbox should be even: ${metrics.gapTop}px top vs ${metrics.gapBottom}px bottom`,
+  ).toBeLessThanOrEqual(1);
+  expect(Math.abs(metrics.gapLeft - metrics.gapRight)).toBeLessThanOrEqual(1);
 });
 
 test('[P1] home hero prompt example cards fill the composer for fallback modes', async ({ page }) => {
