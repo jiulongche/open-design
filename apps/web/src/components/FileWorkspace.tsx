@@ -322,6 +322,15 @@ interface Props {
   handoffArtifactId?: string;
   handoffArtifactKind?: TrackingArtifactKind;
   metricsConsent?: boolean;
+  /**
+   * Whether the daemon can render slides off-screen — the capability behind
+   * PPTX export. `null` means unknown (a daemon predating the flag, or not
+   * answered yet) and must be treated as "assume available": hiding on absence
+   * would take a working export away from deployments that have not upgraded.
+   * Threaded from the app's existing /api/version state rather than fetched
+   * again here, so there is one answer rather than two that can disagree.
+   */
+  slideRendererAvailable?: boolean | null;
   installationId?: string | null;
   chatLocale?: string;
   conversations?: Conversation[];
@@ -1353,6 +1362,7 @@ export function FileWorkspace({
   handoffArtifactId,
   handoffArtifactKind,
   metricsConsent,
+  slideRendererAvailable,
   installationId,
   chatLocale,
   conversations = [],
@@ -3386,6 +3396,7 @@ export function FileWorkspace({
       artifactId={handoffArtifactId}
       artifactKind={handoffArtifactKind}
       metricsConsent={metricsConsent}
+      slideRendererAvailable={slideRendererAvailable}
       installationId={installationId}
       workspaceActive={workspaceActive}
       onRetainActivityChange={handleHtmlViewerRetainActivityChange}

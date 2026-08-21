@@ -170,7 +170,6 @@ import {
   type ExportProgress,
   type ImageExportFormat,
 } from '../runtime/exports';
-import { useSlideRendererAvailable } from '../runtime/runtime-capabilities';
 import { copyToClipboard } from '../lib/copy-to-clipboard';
 import { buildReactComponentSrcdoc } from '../runtime/react-component';
 import { shouldConsumeSlideNav } from '../runtime/slide-nav';
@@ -1811,6 +1810,15 @@ interface Props {
   artifactId?: string;
   artifactKind?: TrackingArtifactKind;
   metricsConsent?: boolean;
+  /**
+   * Whether the daemon can render slides off-screen — the capability behind
+   * PPTX export. `null` means unknown (a daemon predating the flag, or not
+   * answered yet) and must be treated as "assume available": hiding on absence
+   * would take a working export away from deployments that have not upgraded.
+   * Threaded from the app's existing /api/version state rather than fetched
+   * again here, so there is one answer rather than two that can disagree.
+   */
+  slideRendererAvailable?: boolean | null;
   installationId?: string | null;
   /** False while this viewer is retained offscreen for an instant tab revisit. */
   workspaceActive?: boolean;
@@ -1895,6 +1903,7 @@ export const FileViewer = memo(function FileViewer({
   artifactId,
   artifactKind,
   metricsConsent,
+  slideRendererAvailable = null,
   installationId,
   workspaceActive = true,
   onRetainActivityChange,
@@ -1955,6 +1964,7 @@ export const FileViewer = memo(function FileViewer({
   if (rendererMatch?.renderer.id === 'html' || rendererMatch?.renderer.id === 'deck-html') {
     return (
       <HtmlViewer
+        slideRendererAvailable={slideRendererAvailable}
         projectId={projectId}
         projectKind={projectKind}
         file={file}
@@ -7381,6 +7391,7 @@ function HtmlViewer({
   onRetainActivityChange,
   onManualEditExitHandlerChange,
   manualEditEntryAllowed = true,
+  slideRendererAvailable = null,
 }: {
   projectId: string;
   projectKind: TrackingProjectKind;
@@ -7412,6 +7423,8 @@ function HtmlViewer({
   artifactId?: string;
   artifactKind?: TrackingArtifactKind;
   metricsConsent?: boolean;
+  /** Daemon-advertised slide-renderer capability; `null` = unknown = assume available. */
+  slideRendererAvailable?: boolean | null;
   installationId?: string | null;
   workspaceActive?: boolean;
   onRetainActivityChange?: (fileName: string, retain: boolean) => void;
@@ -9073,10 +9086,6 @@ function HtmlViewer({
   const [imageExportFormat, setImageExportFormat] = useState<ImageExportFormat>('png');
   const [imageExportError, setImageExportError] = useState<string | null>(null);
   const [pptxExportModalOpen, setPptxExportModalOpen] = useState(false);
-  // Daemon-advertised, not inferred from the client runtime: a browser pointed
-  // at a desktop-hosted daemon does have a renderer, and a packaged binary run
-  // as a plain daemon does not.
-  const slideRendererAvailable = useSlideRendererAvailable();
   const [pptxExportMode, setPptxExportMode] = useState<'editable' | 'screenshot'>('editable');
   const imageExportSnapshotDataUrlRef = useRef<string | null>(null);
   // Threads the share-popover click → artifact_export_result(image) pair, the

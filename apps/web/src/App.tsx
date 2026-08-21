@@ -5186,6 +5186,7 @@ function AppInner() {
       appMain = (
         <div className="app">
         <ProjectView
+          slideRendererAvailable={appVersionInfo?.capabilities?.slideRenderer ?? null}
           key={projectViewAuthorizationLifetimeKey(
             activeProject.id,
             activeProjectWorkspaceContext,

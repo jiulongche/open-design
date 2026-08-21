@@ -104,7 +104,6 @@ import {
   workspaceResourceUrl,
 } from '../collab/workspace-identity';
 import { PublicFilePublishError } from '../collab/public-file-publish';
-import { isAppVersionInfo, recordAppVersionInfo } from '../runtime/runtime-capabilities';
 
 export const DEFAULT_DEPLOY_PROVIDER_ID = 'vercel-self';
 export const CLOUDFLARE_PAGES_PROVIDER_ID = 'cloudflare-pages';
@@ -1494,24 +1493,28 @@ export async function cancelConnectorAuthorization(connectorId: string): Promise
 }
 
 
+function isAppVersionInfo(value: unknown): value is AppVersionInfo {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<AppVersionInfo>;
+  // `capabilities` is optional so an older daemon's response stays valid; a
+  // present-but-wrong shape is rejected rather than half-trusted.
+  const caps = candidate.capabilities as { slideRenderer?: unknown } | undefined;
+  if (caps !== undefined && (!caps || typeof caps.slideRenderer !== 'boolean')) return false;
+  return (
+    typeof candidate.version === 'string' &&
+    typeof candidate.channel === 'string' &&
+    typeof candidate.packaged === 'boolean' &&
+    typeof candidate.platform === 'string' &&
+    typeof candidate.arch === 'string'
+  );
+}
+
 export async function fetchAppVersionInfo(): Promise<AppVersionInfo | null> {
   try {
     const resp = await fetch('/api/version');
     if (!resp.ok) return null;
-    let json: Partial<AppVersionResponse>;
-    try {
-      json = (await resp.json()) as Partial<AppVersionResponse>;
-    } catch {
-      // A 200 we cannot parse is still an answer, just an unusable one, so it
-      // invalidates rather than leaving a previously cached capability in
-      // place. Transport failures fall to the outer catch and leave it alone.
-      recordAppVersionInfo(undefined);
-      return null;
-    }
-    // Route every parsed body through the capability store, including an
-    // invalid one, for the same reason.
-    recordAppVersionInfo(json.version);
-    return isAppVersionInfo(json.version) ? json.version : null;
+    const json = (await resp.json()) as Partial<AppVersionResponse>;
+    return isAppVersionInfo(json?.version) ? json.version : null;
   } catch {
     return null;
   }
