@@ -248,3 +248,49 @@ describe('stateful invalidation edges', () => {
     await expect(loadSlideRendererAvailable()).resolves.toBe(false);
   });
 });
+
+describe('concurrency and unusable answers', () => {
+  it('drops a probe result that a newer answer has already superseded', async () => {
+    // The blocking case: a probe issued before the boot fetch must not land
+    // afterwards and put its stale `true` back over the boot answer's `false`.
+    let release!: (value: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { release = resolve; })));
+
+    const pending = loadSlideRendererAvailable();
+    recordAppVersionInfo({ ...FULL_INFO, capabilities: { slideRenderer: false } });
+
+    release(new Response(versionBody({ slideRenderer: true }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    await pending;
+
+    await expect(loadSlideRendererAvailable()).resolves.toBe(false);
+  });
+
+  it('treats an unparseable 200 as unknown rather than keeping a stale false', async () => {
+    // Has to go through the boot path: the direct probe short-circuits while a
+    // known answer is cached, so it is `fetchAppVersionInfo` that can meet an
+    // unusable response holding a stale `false`.
+    const { fetchAppVersionInfo } = await import('../src/providers/registry');
+    recordAppVersionInfo({ ...FULL_INFO, capabilities: { slideRenderer: false } });
+    expect(await loadSlideRendererAvailable()).toBe(false);
+
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('not json', { status: 200, headers: { 'content-type': 'application/json' } })));
+    await expect(fetchAppVersionInfo()).resolves.toBeNull();
+
+    mockVersionFetch(versionBody(undefined));
+    await expect(loadSlideRendererAvailable()).resolves.toBeNull();
+  });
+
+  it('keeps a known answer when the boot fetch fails at the transport level', async () => {
+    const { fetchAppVersionInfo } = await import('../src/providers/registry');
+    recordAppVersionInfo({ ...FULL_INFO, capabilities: { slideRenderer: false } });
+
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+    await expect(fetchAppVersionInfo()).resolves.toBeNull();
+
+    await expect(loadSlideRendererAvailable()).resolves.toBe(false);
+  });
+});

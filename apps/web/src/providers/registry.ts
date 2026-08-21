@@ -1498,11 +1498,18 @@ export async function fetchAppVersionInfo(): Promise<AppVersionInfo | null> {
   try {
     const resp = await fetch('/api/version');
     if (!resp.ok) return null;
-    const json = (await resp.json()) as Partial<AppVersionResponse>;
+    let json: Partial<AppVersionResponse>;
+    try {
+      json = (await resp.json()) as Partial<AppVersionResponse>;
+    } catch {
+      // A 200 we cannot parse is still an answer, just an unusable one, so it
+      // invalidates rather than leaving a previously cached capability in
+      // place. Transport failures fall to the outer catch and leave it alone.
+      recordAppVersionInfo(undefined);
+      return null;
+    }
     // Route every parsed body through the capability store, including an
-    // invalid one: a malformed payload is still an answer, and the contract
-    // says it means unknown — early-returning here would leave a previously
-    // cached `false` hiding the entry.
+    // invalid one, for the same reason.
     recordAppVersionInfo(json.version);
     return isAppVersionInfo(json.version) ? json.version : null;
   } catch {

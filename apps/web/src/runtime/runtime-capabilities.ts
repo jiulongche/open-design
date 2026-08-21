@@ -33,6 +33,14 @@ type Snapshot = boolean | null;
 
 let snapshot: Snapshot = null;
 let inFlight: Promise<Snapshot> | null = null;
+// Bumped by every write. A probe carries the generation it was issued under
+// and drops its result if that has moved on: clearing `inFlight` stops a stale
+// promise being *served*, but not a request already in the air from writing
+// when it lands. Without this, a probe issued before the boot fetch could
+// resume afterwards and put `true` back over the boot answer's `false` — the
+// entry returns on a headless daemon and the next export hits the 501 this
+// change exists to gate.
+let generation = 0;
 const listeners = new Set<Listener>();
 
 const RETRY_DELAYS_MS = [500, 1_500, 4_000];
@@ -44,6 +52,7 @@ const RETRY_DELAYS_MS = [500, 1_500, 4_000];
  */
 function setSnapshot(next: Snapshot): void {
   inFlight = null;
+  generation += 1;
   if (snapshot === next) return;
   snapshot = next;
   for (const listener of listeners) listener();
@@ -87,18 +96,33 @@ export function recordAppVersionInfo(info: unknown): void {
 }
 
 async function probe(): Promise<Snapshot> {
+  const issuedAt = generation;
+  let resp: Response;
   try {
-    const resp = await fetch('/api/version');
-    // A transport/HTTP failure says nothing about the daemon's capabilities —
-    // unlike a malformed body, it is not an answer — so it must not invalidate
-    // a snapshot we already have.
-    if (!resp.ok) return snapshot;
-    const body = (await resp.json()) as { version?: unknown };
-    recordAppVersionInfo(body?.version);
-    return snapshot;
+    resp = await fetch('/api/version');
   } catch {
+    // Transport failure. Says nothing about the daemon's capabilities — it is
+    // not an answer at all — so it must not invalidate what we already know.
     return snapshot;
   }
+  if (!resp.ok) return snapshot;
+  try {
+    const body = (await resp.json()) as { version?: unknown };
+    return applyVersionBody(body?.version, issuedAt);
+  } catch {
+    // Deliberately NOT the same as the transport case: a 200 whose body will
+    // not parse IS an answer, just an unusable one, and the contract says that
+    // means unknown. Collapsing the two would let a stale `false` survive it.
+    return applyVersionBody(undefined, issuedAt);
+  }
+}
+
+function applyVersionBody(version: unknown, issuedAt: number): Snapshot {
+  // Someone answered while this request was in the air; that answer is newer
+  // than anything this one can say.
+  if (generation !== issuedAt) return snapshot;
+  recordAppVersionInfo(version);
+  return snapshot;
 }
 
 /** `true` / `false` once the daemon has answered, `null` while unknown. */
