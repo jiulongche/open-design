@@ -19,7 +19,7 @@ import { useEffect, useState } from 'react';
 
 import type { AppVersionInfo } from '../types';
 
-type Listener = (value: boolean) => void;
+type Listener = (value: boolean | null) => void;
 
 let cached: boolean | null = null;
 let inFlight: Promise<boolean | null> | null = null;
@@ -33,9 +33,38 @@ const listeners = new Set<Listener>();
 // its own visible problem and should not be polled forever.
 const RETRY_DELAYS_MS = [500, 1_500, 4_000];
 
-function publish(value: boolean): void {
+function publish(value: boolean | null): void {
   cached = value;
   for (const listener of listeners) listener(value);
+}
+
+/**
+ * Full envelope validation before anything is trusted. The mixed-version
+ * contract says malformed means unknown, so a stray `{version:{capabilities:
+ * {slideRenderer:false}}}` must not be able to hide the entry — accepting the
+ * capability without checking the payload it arrived in would let a malformed
+ * response do exactly that. Lives here rather than in the registry so the
+ * dependency stays one-directional (registry imports this module, never the
+ * reverse).
+ */
+export function isAppVersionInfo(value: unknown): value is AppVersionInfo {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<AppVersionInfo>;
+  if (candidate.capabilities !== undefined && !isAppRuntimeCapabilities(candidate.capabilities)) {
+    return false;
+  }
+  return (
+    typeof candidate.version === 'string' &&
+    typeof candidate.channel === 'string' &&
+    typeof candidate.packaged === 'boolean' &&
+    typeof candidate.platform === 'string' &&
+    typeof candidate.arch === 'string'
+  );
+}
+
+function isAppRuntimeCapabilities(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  return typeof (value as { slideRenderer?: unknown }).slideRenderer === 'boolean';
 }
 
 /**
@@ -43,17 +72,25 @@ function publish(value: boolean): void {
  * Called by the app's boot fetch so the common path costs no extra request and
  * cannot disagree with what boot already learned.
  */
-export function recordAppVersionInfo(info: AppVersionInfo | null | undefined): void {
-  const next = info?.capabilities?.slideRenderer;
-  if (typeof next === 'boolean') publish(next);
+export function recordAppVersionInfo(info: unknown): void {
+  if (!isAppVersionInfo(info)) return;
+  const next = info.capabilities?.slideRenderer;
+  // A fresh, valid response that carries no capability means the daemon on the
+  // other end does not advertise one — a restart or downgrade, say. Holding on
+  // to a previously resolved `false` would keep the entry hidden against a
+  // daemon the contract says we know nothing about, so drop back to unknown
+  // and tell mounted consumers, rather than letting a stale answer outlive the
+  // daemon that gave it.
+  publish(typeof next === 'boolean' ? next : null);
 }
 
 async function probe(): Promise<boolean | null> {
   try {
     const resp = await fetch('/api/version');
     if (!resp.ok) return null;
-    const body = (await resp.json()) as { version?: AppVersionInfo };
-    const next = body?.version?.capabilities?.slideRenderer;
+    const body = (await resp.json()) as { version?: unknown };
+    if (!isAppVersionInfo(body?.version)) return null;
+    const next = body.version.capabilities?.slideRenderer;
     if (typeof next !== 'boolean') return null;
     publish(next);
     return next;

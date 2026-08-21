@@ -174,3 +174,46 @@ describe('daemon-down diagnostic through the API proxy', () => {
     });
   });
 });
+
+const FULL_INFO = {
+  version: '1.2.3',
+  channel: 'stable',
+  packaged: false,
+  platform: 'darwin',
+  arch: 'arm64',
+} as const;
+
+describe('mixed-version compatibility edges', () => {
+  it('drops a resolved false when a later daemon stops advertising the capability', async () => {
+    // A restart or downgrade answers without the optional field. Keeping the
+    // old `false` would hide the entry against a daemon the contract says we
+    // know nothing about.
+    recordAppVersionInfo({ ...FULL_INFO, capabilities: { slideRenderer: false } });
+    await expect(loadSlideRendererAvailable()).resolves.toBe(false);
+
+    recordAppVersionInfo({ ...FULL_INFO });
+
+    mockVersionFetch(versionBody(undefined));
+    await expect(loadSlideRendererAvailable()).resolves.toBeNull();
+  });
+
+  it('refuses a capability arriving in a malformed envelope', async () => {
+    // Trusting the capability without validating the payload it came in would
+    // let a malformed response hide the entry — malformed means unknown.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ version: { capabilities: { slideRenderer: false } } }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+    await expect(loadSlideRendererAvailable()).resolves.toBeNull();
+
+    resetSlideRendererAvailableCache();
+    recordAppVersionInfo({ capabilities: { slideRenderer: false } });
+    mockVersionFetch(versionBody({ slideRenderer: true }));
+    await expect(loadSlideRendererAvailable()).resolves.toBe(true);
+  });
+});
