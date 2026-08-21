@@ -1258,7 +1258,24 @@ function AppInner() {
   const [appVersionInfo, setAppVersionInfo] = useState<AppVersionInfo | null>(
     null,
   );
-  const [daemonMediaProviders, setDaemonMediaProviders] = useState<
+
+
+  // The boot fetch is one-shot, and `fetchAppVersionInfo` yields null on any
+  // failed or non-OK response. Left there, a daemon that was merely slow to
+  // come up would leave every capability unknown for the life of the page —
+  // and since unknown deliberately fails open, a headless daemon would keep
+  // offering exports it can only answer with 501. Re-ask once the daemon is
+  // reachable, so a startup blip stops being permanent.
+  useEffect(() => {
+    if (!daemonLive || appVersionInfo) return;
+    let cancelled = false;
+    void fetchAppVersionInfo().then((info) => {
+      if (!cancelled && info) setAppVersionInfo(info);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [daemonLive, appVersionInfo]);  const [daemonMediaProviders, setDaemonMediaProviders] = useState<
     AppConfig['mediaProviders'] | null
   >(null);
   const [daemonMediaProvidersFetchState, setDaemonMediaProvidersFetchState] = useState<
@@ -5071,6 +5088,7 @@ function AppInner() {
   } else if (route.kind === 'design-system-detail') {
     appMain = (
       <DesignSystemDetailView
+        slideRendererAvailable={appVersionInfo?.capabilities?.slideRenderer ?? null}
         id={route.designSystemId}
         selectedId={config.designSystemId}
         config={config}
