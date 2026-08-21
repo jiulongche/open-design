@@ -126,3 +126,51 @@ describe('capability cache fed by the boot fetch', () => {
     await expect(loadSlideRendererAvailable()).resolves.toBe(true);
   });
 });
+
+describe('daemon-down diagnostic through the API proxy', () => {
+  // The proxies answer instead of failing the fetch when the daemon is down:
+  // the web sidecar with a plain-text 502, Next's dev rewrite with a plain-text
+  // 500. Without recognising those, the daemon-down message this change adds
+  // would never fire on the packaged / sidecar path — the common one.
+  it.each([
+    ['sidecar', 502],
+    ['next dev rewrite', 500],
+  ])('classifies a %s connection error as unreachable', async (_name, status) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response('connect ECONNREFUSED 127.0.0.1:7456', {
+          status,
+          headers: { 'content-type': 'text/plain; charset=utf-8' },
+        }),
+      ),
+    );
+
+    const { exportProjectAsPptx } = await import('../src/runtime/exports');
+    await expect(exportProjectAsPptx({ projectId: 'p', fileName: 'deck.html' })).resolves.toEqual({
+      ok: false,
+      unavailable: true,
+      reason: 'unreachable',
+    });
+  });
+
+  it('leaves a real upstream 502 as a semantic error rather than calling it an outage', async () => {
+    // Widening this to any 5xx would relabel genuine server errors as "the
+    // daemon is down", which misleads in the opposite direction.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ error: { message: 'renderer exploded' } }), {
+          status: 502,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+
+    const { exportProjectAsPptx } = await import('../src/runtime/exports');
+    await expect(exportProjectAsPptx({ projectId: 'p', fileName: 'deck.html' })).resolves.toEqual({
+      ok: false,
+      error: 'renderer exploded',
+    });
+  });
+});

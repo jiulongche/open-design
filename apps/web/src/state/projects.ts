@@ -7,6 +7,7 @@
 // result changes behavior must preserve failure as a typed error instead.
 
 import { coalescedGet, evictCoalescedGet } from '../lib/coalesced-get';
+import { isDaemonProxyConnectionFailure } from '../runtime/daemon-proxy-failure';
 import { BackoffController, type BackoffOptions } from '../lib/backoff';
 import { markProjectCreatedByViewer } from '../collab/useProjectCollab';
 import { API_ERROR_CODES, type ApiErrorCode } from '@open-design/contracts';
@@ -652,22 +653,6 @@ function defaultRetrySleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Next's same-origin API proxy turns a missing local daemon into a plain-text
- * 502 instead of rejecting `fetch`. Recognize only its connection-level errno
- * shape; an upstream/product 502 (normally JSON) remains a business response.
- */
-async function isLocalDaemonProxyFailure(resp: Response): Promise<boolean> {
-  if (resp.status !== 502) return false;
-  const contentType = resp.headers.get('content-type')?.toLowerCase() ?? '';
-  if (!contentType.startsWith('text/plain')) return false;
-  try {
-    const body = await resp.clone().text();
-    return /\b(?:ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT)\b/u.test(body);
-  } catch {
-    return false;
-  }
-}
 
 /** Parse a create/write error body into a UI message + the retryable flag. */
 async function readWorkspaceWriteError(
@@ -796,7 +781,7 @@ export async function createProject(
         markProjectCreatedByViewer(created.project.id, input.workspaceContext ?? null);
         return created;
       }
-      if (await isLocalDaemonProxyFailure(resp)) {
+      if (await isDaemonProxyConnectionFailure(resp)) {
         throw new ProjectCreateError(
           'Could not reach the local OpenDesign service',
           null,

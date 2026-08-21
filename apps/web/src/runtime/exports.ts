@@ -13,6 +13,7 @@
 import { buildSrcdoc, type SrcdocOptions } from './srcdoc';
 import { buildReactComponentSrcdoc } from './react-component';
 import { buildZip } from './zip';
+import { isDaemonProxyConnectionFailure } from './daemon-proxy-failure';
 import { randomUUID } from '../utils/uuid';
 import {
   captureHostPage,
@@ -995,6 +996,13 @@ export async function exportProjectAsPptx(opts: {
     // the vector/browser PDF. Everything else is a real (semantic) failure that
     // must surface, not be masked by the vector path.
     if (resp.status === 501) return { ok: false, unavailable: true, reason: 'no-renderer' };
+    // The proxy in front of the daemon answers instead of failing the fetch
+    // when the daemon is down, so an outage arrives as a plain-text 5xx rather
+    // than a rejection. Classify it before the generic branch below, otherwise
+    // the daemon-down diagnostic never fires on the packaged / sidecar path.
+    if (await isDaemonProxyConnectionFailure(resp)) {
+      return { ok: false, unavailable: true, reason: 'unreachable' };
+    }
     let message = `export request failed (${resp.status})`;
     try {
       const err = await resp.json();
@@ -1150,6 +1158,13 @@ export async function exportProjectImageDataUrl(opts: {
   if (!resp.ok) {
     // 501 = this runtime has no off-screen renderer → caller may fall back.
     if (resp.status === 501) return { ok: false, unavailable: true, reason: 'no-renderer' };
+    // The proxy in front of the daemon answers instead of failing the fetch
+    // when the daemon is down, so an outage arrives as a plain-text 5xx rather
+    // than a rejection. Classify it before the generic branch below, otherwise
+    // the daemon-down diagnostic never fires on the packaged / sidecar path.
+    if (await isDaemonProxyConnectionFailure(resp)) {
+      return { ok: false, unavailable: true, reason: 'unreachable' };
+    }
     let message = `image export failed (${resp.status})`;
     let code: string | undefined;
     try {
