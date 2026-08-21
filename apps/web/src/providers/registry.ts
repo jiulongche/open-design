@@ -105,6 +105,7 @@ import {
   workspaceResourceUrl,
 } from '../collab/workspace-identity';
 import { PublicFilePublishError } from '../collab/public-file-publish';
+import { recordAppVersionInfo } from '../runtime/runtime-capabilities';
 
 export const DEFAULT_DEPLOY_PROVIDER_ID = 'vercel-self';
 export const CLOUDFLARE_PAGES_PROVIDER_ID = 'cloudflare-pages';
@@ -1523,7 +1524,13 @@ export async function fetchAppVersionInfo(): Promise<AppVersionInfo | null> {
     const resp = await fetch('/api/version');
     if (!resp.ok) return null;
     const json = (await resp.json()) as Partial<AppVersionResponse>;
-    return isAppVersionInfo(json.version) ? json.version : null;
+    if (!isAppVersionInfo(json.version)) return null;
+    // Feed the runtime-capability cache from the boot pass so consumers do not
+    // race this request with one of their own — and so a consumer whose own
+    // probe failed cannot stay permissive while this response already said
+    // otherwise.
+    recordAppVersionInfo(json.version);
+    return json.version;
   } catch {
     return null;
   }

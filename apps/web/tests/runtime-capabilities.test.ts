@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   loadSlideRendererAvailable,
+  recordAppVersionInfo,
   resetSlideRendererAvailableCache,
 } from '../src/runtime/runtime-capabilities';
 
@@ -89,5 +90,39 @@ describe('slide renderer capability', () => {
     // Third round: resolved, so no further request.
     await expect(loadSlideRendererAvailable()).resolves.toBe(true);
     expect(answering).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('capability cache fed by the boot fetch', () => {
+  it('takes the answer from an already-fetched version payload without a request', async () => {
+    const fetchMock = mockVersionFetch(versionBody({ slideRenderer: true }));
+
+    // The app's boot pass hands us what it already fetched...
+    recordAppVersionInfo({
+      version: '1.2.3',
+      channel: 'stable',
+      packaged: false,
+      platform: 'darwin',
+      arch: 'arm64',
+      capabilities: { slideRenderer: false },
+    });
+
+    // ...so no second request goes out, and the boot answer is what we report.
+    await expect(loadSlideRendererAvailable()).resolves.toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('ignores a payload with no capability block instead of caching a guess', async () => {
+    recordAppVersionInfo({
+      version: '1.2.3',
+      channel: 'stable',
+      packaged: false,
+      platform: 'darwin',
+      arch: 'arm64',
+    });
+
+    mockVersionFetch(versionBody({ slideRenderer: true }));
+    // Still unknown after the record, so the probe is allowed to run.
+    await expect(loadSlideRendererAvailable()).resolves.toBe(true);
   });
 });

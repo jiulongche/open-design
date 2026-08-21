@@ -12,6 +12,10 @@ import type {
 } from '@open-design/host';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ANNOTATION_EVENT } from '../../src/components/PreviewDrawOverlay';
+import {
+  recordAppVersionInfo,
+  resetSlideRendererAvailableCache,
+} from '../../src/runtime/runtime-capabilities';
 
 const { saveTemplateMock } = vi.hoisted(() => ({
   saveTemplateMock: vi.fn(),
@@ -6611,6 +6615,67 @@ describe('FileViewer SVG artifacts', () => {
       });
     } finally {
       restoreHost();
+    }
+  });
+
+  // The gate is only useful if a late answer reaches an already-mounted viewer.
+  // The first shape of this hook probed once and ignored an unresolved result,
+  // so a probe that raced daemon startup left the entry showing for the life of
+  // that mount — still clickable straight into the 501 the gate exists to stop.
+  it('drops the PPTX entry when an unresolved capability probe is later answered with false', async () => {
+    resetSlideRendererAvailableCache();
+    // First probe cannot resolve: no capability block comes back.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ version: {} }), { status: 200 })),
+    );
+    const file = baseFile({
+      name: 'slides.html',
+      path: 'slides.html',
+      mime: 'text/html',
+      kind: 'html',
+      artifactManifest: {
+        version: 1,
+        kind: 'html',
+        title: 'Slides',
+        entry: 'slides.html',
+        renderer: 'html',
+        exports: ['html'],
+      },
+    });
+
+    try {
+      render(
+        <FileViewer
+          projectId="project-1"
+          projectKind="prototype"
+          file={file}
+          liveHtml='<html><body><section data-screen-label="One">One</section><section data-screen-label="Two">Two</section></body></html>'
+        />,
+      );
+
+      // Unknown means "assume available", so the entry is there for now.
+      await openUnifiedExportTab();
+      expect(screen.getByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
+
+      // A later answer — the app boot fetch landing, or a retry succeeding —
+      // must reach this mounted viewer.
+      await act(async () => {
+        recordAppVersionInfo({
+          version: '1.2.3',
+          channel: 'stable',
+          packaged: false,
+          platform: 'linux',
+          arch: 'x64',
+          capabilities: { slideRenderer: false },
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
+      });
+    } finally {
+      resetSlideRendererAvailableCache();
     }
   });
 
