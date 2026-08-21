@@ -15,44 +15,52 @@
 // request. Deliberately no import from `providers/registry` — the dependency
 // runs the other way, so the two cannot form a cycle.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useSyncExternalStore } from 'react';
 
 import type { AppVersionInfo } from '../types';
 
-type Listener = (value: boolean | null) => void;
+// One state atom, one writer. The earlier shape kept `cached`, `inFlight` and
+// the listener set as separate mutable pieces, and every fix exposed another
+// pair that could disagree: an invalidation that forgot the in-flight promise,
+// a validation path that forgot the invalidation. Collapsing them means those
+// inconsistencies are no longer representable rather than merely avoided by
+// remembering to update two places.
 
-let cached: boolean | null = null;
-let inFlight: Promise<boolean | null> | null = null;
+type Listener = () => void;
+
+/** `null` = unknown: unreachable, malformed, or a daemon predating the field. */
+type Snapshot = boolean | null;
+
+let snapshot: Snapshot = null;
+let inFlight: Promise<Snapshot> | null = null;
 const listeners = new Set<Listener>();
 
-// Bounded, backing-off retry. An unresolved probe used to be terminal for an
-// already-mounted viewer: the answer never arrived, the gate stayed permissive,
-// and the export it was meant to hide could still be clicked into a 501. A
-// probe that races daemon startup or blips is exactly the case that needs a
-// second look, so retry a few times and then stop — an unreachable daemon is
-// its own visible problem and should not be polled forever.
 const RETRY_DELAYS_MS = [500, 1_500, 4_000];
 
-function publish(value: boolean | null): void {
-  cached = value;
-  for (const listener of listeners) listener(value);
+/**
+ * The only writer. Always drops any in-flight/settled probe: once the answer
+ * changes, a promise created under the old one can only report something this
+ * state has already superseded.
+ */
+function setSnapshot(next: Snapshot): void {
+  inFlight = null;
+  if (snapshot === next) return;
+  snapshot = next;
+  for (const listener of listeners) listener();
 }
 
 /**
- * Full envelope validation before anything is trusted. The mixed-version
- * contract says malformed means unknown, so a stray `{version:{capabilities:
- * {slideRenderer:false}}}` must not be able to hide the entry — accepting the
- * capability without checking the payload it arrived in would let a malformed
- * response do exactly that. Lives here rather than in the registry so the
+ * Full envelope validation. The mixed-version contract says malformed means
+ * unknown, so a stray `{version:{capabilities:{slideRenderer:false}}}` must not
+ * be able to hide the entry. Lives here rather than in the registry so the
  * dependency stays one-directional (registry imports this module, never the
  * reverse).
  */
 export function isAppVersionInfo(value: unknown): value is AppVersionInfo {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<AppVersionInfo>;
-  if (candidate.capabilities !== undefined && !isAppRuntimeCapabilities(candidate.capabilities)) {
-    return false;
-  }
+  const caps = candidate.capabilities as { slideRenderer?: unknown } | undefined;
+  if (caps !== undefined && (!caps || typeof caps.slideRenderer !== 'boolean')) return false;
   return (
     typeof candidate.version === 'string' &&
     typeof candidate.channel === 'string' &&
@@ -62,119 +70,94 @@ export function isAppVersionInfo(value: unknown): value is AppVersionInfo {
   );
 }
 
-function isAppRuntimeCapabilities(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  return typeof (value as { slideRenderer?: unknown }).slideRenderer === 'boolean';
-}
-
 /**
- * Feed an already-fetched `/api/version` payload into the capability cache.
- * Called by the app's boot fetch so the common path costs no extra request and
- * cannot disagree with what boot already learned.
+ * Feed a parsed `/api/version` body in. Called by the app's boot fetch so the
+ * common path costs no extra request and the two paths cannot disagree.
+ *
+ * Anything that is not a valid payload carrying a capability resets to unknown:
+ * a daemon that stopped advertising the field (restart, downgrade) and a
+ * malformed response both mean "we no longer know", and holding a previous
+ * `false` would keep hiding the entry against a daemon the contract says we
+ * know nothing about.
  */
 export function recordAppVersionInfo(info: unknown): void {
-  if (!isAppVersionInfo(info)) return;
+  if (!isAppVersionInfo(info)) return setSnapshot(null);
   const next = info.capabilities?.slideRenderer;
-  // A fresh, valid response that carries no capability means the daemon on the
-  // other end does not advertise one — a restart or downgrade, say. Holding on
-  // to a previously resolved `false` would keep the entry hidden against a
-  // daemon the contract says we know nothing about, so drop back to unknown
-  // and tell mounted consumers, rather than letting a stale answer outlive the
-  // daemon that gave it.
-  publish(typeof next === 'boolean' ? next : null);
+  setSnapshot(typeof next === 'boolean' ? next : null);
 }
 
-async function probe(): Promise<boolean | null> {
+async function probe(): Promise<Snapshot> {
   try {
     const resp = await fetch('/api/version');
-    if (!resp.ok) return null;
+    // A transport/HTTP failure says nothing about the daemon's capabilities —
+    // unlike a malformed body, it is not an answer — so it must not invalidate
+    // a snapshot we already have.
+    if (!resp.ok) return snapshot;
     const body = (await resp.json()) as { version?: unknown };
-    if (!isAppVersionInfo(body?.version)) return null;
-    const next = body.version.capabilities?.slideRenderer;
-    if (typeof next !== 'boolean') return null;
-    publish(next);
-    return next;
+    recordAppVersionInfo(body?.version);
+    return snapshot;
   } catch {
-    return null;
+    return snapshot;
   }
 }
 
-/**
- * `true` / `false` once the daemon has answered, `null` while unknown —
- * either unreachable or a daemon predating the field.
- */
-export function loadSlideRendererAvailable(): Promise<boolean | null> {
-  if (cached !== null) return Promise.resolve(cached);
+/** `true` / `false` once the daemon has answered, `null` while unknown. */
+export function loadSlideRendererAvailable(): Promise<Snapshot> {
+  if (snapshot !== null) return Promise.resolve(snapshot);
+  // One rule: an in-flight promise only outlives the request while it is
+  // still outstanding. Clearing it on settle — not only when it produced an
+  // answer — is what keeps an unanswered probe retryable instead of pinning
+  // "unknown" for the session.
   if (!inFlight) {
-    inFlight = (async () => {
-      try {
-        return await probe();
-      } finally {
-        // Allow a retry when the answer was not knowable this time.
-        if (cached === null) inFlight = null;
-      }
-    })();
+    inFlight = probe().finally(() => {
+      inFlight = null;
+    });
   }
   return inFlight;
 }
 
-/** Test seam: drop the module-scope cache and any pending work. */
+/** Test seam: drop the module-scope state. */
 export function resetSlideRendererAvailableCache(): void {
-  cached = null;
+  snapshot = null;
   inFlight = null;
   listeners.clear();
+}
+
+function subscribe(listener: Listener): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function getSnapshot(): Snapshot {
+  return snapshot;
 }
 
 /**
  * `null` until the daemon answers. Callers gating UI should treat `null` as
  * "assume available" rather than "hide": a daemon older than the capability
  * field omits it, and hiding on absence would take a working export away from
- * every deployment that has not upgraded. Only an explicit `false` — a daemon
- * that answered and said it has no renderer — should hide anything.
+ * every deployment that has not upgraded. Only an explicit `false` should hide
+ * anything.
  *
- * Subscribes to the shared cache, so an answer that arrives from the app's boot
- * fetch (or from another mounted consumer) reaches this component too instead
- * of leaving it pinned on its own failed probe.
+ * Reads the shared atom, so every mounted consumer sees the same answer —
+ * including a later invalidation back to unknown.
  */
-export function useSlideRendererAvailable(): boolean | null {
-  const [available, setAvailable] = useState<boolean | null>(cached);
+export function useSlideRendererAvailable(): Snapshot {
+  const available = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   useEffect(() => {
+    if (snapshot !== null) return;
     let cancelled = false;
-    const listener: Listener = (value) => {
-      if (!cancelled) setAvailable(value);
-    };
-    // Subscribe unconditionally, even when the cache is already resolved. An
-    // early return here would leave a viewer that mounted while the answer was
-    // `false` unable to hear the invalidation when a later daemon stops
-    // advertising the field — its entry would stay hidden against a daemon the
-    // contract says is unknown, which is the bug the invalidation exists to
-    // prevent, just moved one layer out.
-    listeners.add(listener);
-    setAvailable(cached);
-
-    if (cached !== null) {
-      return () => {
-        cancelled = true;
-        listeners.delete(listener);
-      };
-    }
-
     void (async () => {
-      for (let attempt = 0; ; attempt += 1) {
-        if (cancelled) return;
-        const next = await loadSlideRendererAvailable();
-        // `publish` already notified the listener; nothing more to do.
-        if (next !== null) return;
+      for (let attempt = 0; !cancelled; attempt += 1) {
+        if ((await loadSlideRendererAvailable()) !== null) return;
         const delay = RETRY_DELAYS_MS[attempt];
         if (delay === undefined) return;
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     })();
-
     return () => {
       cancelled = true;
-      listeners.delete(listener);
     };
   }, []);
 

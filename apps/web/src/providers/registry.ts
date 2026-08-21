@@ -1499,13 +1499,12 @@ export async function fetchAppVersionInfo(): Promise<AppVersionInfo | null> {
     const resp = await fetch('/api/version');
     if (!resp.ok) return null;
     const json = (await resp.json()) as Partial<AppVersionResponse>;
-    if (!isAppVersionInfo(json.version)) return null;
-    // Feed the runtime-capability cache from the boot pass so consumers do not
-    // race this request with one of their own — and so a consumer whose own
-    // probe failed cannot stay permissive while this response already said
-    // otherwise.
+    // Route every parsed body through the capability store, including an
+    // invalid one: a malformed payload is still an answer, and the contract
+    // says it means unknown — early-returning here would leave a previously
+    // cached `false` hiding the entry.
     recordAppVersionInfo(json.version);
-    return json.version;
+    return isAppVersionInfo(json.version) ? json.version : null;
   } catch {
     return null;
   }

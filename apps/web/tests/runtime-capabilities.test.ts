@@ -217,3 +217,34 @@ describe('mixed-version compatibility edges', () => {
     await expect(loadSlideRendererAvailable()).resolves.toBe(true);
   });
 });
+
+describe('stateful invalidation edges', () => {
+  it('does not serve a settled probe after the answer is invalidated', async () => {
+    // The in-flight promise is part of the same state as the value it resolved
+    // under; leaving it behind lets a superseded answer be served again.
+    mockVersionFetch(versionBody({ slideRenderer: false }));
+    await expect(loadSlideRendererAvailable()).resolves.toBe(false);
+
+    recordAppVersionInfo({ ...FULL_INFO });
+
+    mockVersionFetch(versionBody(undefined));
+    await expect(loadSlideRendererAvailable()).resolves.toBeNull();
+  });
+
+  it('invalidates a cached false when a later response is malformed', async () => {
+    recordAppVersionInfo({ ...FULL_INFO, capabilities: { slideRenderer: false } });
+    await expect(loadSlideRendererAvailable()).resolves.toBe(false);
+
+    recordAppVersionInfo({ capabilities: { slideRenderer: true } });
+
+    mockVersionFetch(versionBody(undefined));
+    await expect(loadSlideRendererAvailable()).resolves.toBeNull();
+  });
+
+  it('leaves a known answer alone when the daemon is merely unreachable', async () => {
+    // A transport failure is not an answer and must not erase what we know.
+    recordAppVersionInfo({ ...FULL_INFO, capabilities: { slideRenderer: false } });
+    mockVersionFetch(null);
+    await expect(loadSlideRendererAvailable()).resolves.toBe(false);
+  });
+});
