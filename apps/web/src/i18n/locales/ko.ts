@@ -3252,6 +3252,7 @@ export const ko: Dict = {
   'fileViewer.exportPptxBusy': '현재 작업이 끝날 때까지 기다려 주세요.',
   'fileViewer.exportPptxHint': '이 디자인을 PPTX로 변환하도록 에이전트에 요청합니다.',
   'fileViewer.exportPptxNa': '이곳에서는 PPTX 내보내기를 할 수 없습니다.',
+  'fileViewer.exportDaemonUnreachable': '데몬에 연결할 수 없습니다. 다시 시도해 주세요.',
   'fileViewer.exportZip': '.zip으로 다운로드',
   'fileViewer.exportHtml': '독립 실행형 HTML로 내보내기',
   'fileViewer.exportMd': 'Markdown으로 내보내기',

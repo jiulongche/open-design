@@ -170,6 +170,7 @@ import {
   type ExportProgress,
   type ImageExportFormat,
 } from '../runtime/exports';
+import { useSlideRendererAvailable } from '../runtime/runtime-capabilities';
 import { copyToClipboard } from '../lib/copy-to-clipboard';
 import { buildReactComponentSrcdoc } from '../runtime/react-component';
 import { shouldConsumeSlideNav } from '../runtime/slide-nav';
@@ -9072,6 +9073,10 @@ function HtmlViewer({
   const [imageExportFormat, setImageExportFormat] = useState<ImageExportFormat>('png');
   const [imageExportError, setImageExportError] = useState<string | null>(null);
   const [pptxExportModalOpen, setPptxExportModalOpen] = useState(false);
+  // Daemon-advertised, not inferred from the client runtime: a browser pointed
+  // at a desktop-hosted daemon does have a renderer, and a packaged binary run
+  // as a plain daemon does not.
+  const slideRendererAvailable = useSlideRendererAvailable();
   const [pptxExportMode, setPptxExportMode] = useState<'editable' | 'screenshot'>('editable');
   const imageExportSnapshotDataUrlRef = useRef<string | null>(null);
   // Threads the share-popover click → artifact_export_result(image) pair, the
@@ -14461,7 +14466,15 @@ function HtmlViewer({
   // PPTX export is slide-based, so show it only for explicit decks plus
   // structured deck runtimes. Do not key this off plain `.slide`: ordinary
   // parallax/long pages may use that class but must remain page-mode exports.
-  const showPptxExport = canShare && deckExportSignal;
+  // ...and only when the daemon on the other end can actually render slides.
+  // The route this button calls hard-fails with 501 when `desktopSlideRenderer`
+  // is absent (headless / container deployments), and both modes in the export
+  // modal reach that same 501, so without this the user is offered an action —
+  // and a mode choice — that cannot succeed. `null` means the daemon has not
+  // answered or predates the flag: keep showing the entry, since hiding on
+  // absence would take a working export away from every deployment that has
+  // not upgraded. Only an explicit `false` hides it.
+  const showPptxExport = canShare && deckExportSignal && slideRendererAvailable !== false;
   const canPptx = showPptxExport && !streaming;
   const showMarkdownExport = source !== null && isMarkdownArtifact && !viewerOnly;
   const showImageExport = canShare;
@@ -17406,7 +17419,21 @@ function HtmlViewer({
                       editable,
                       workspaceContext,
                     });
-                    if (!res.ok) throw new Error('error' in res ? res.error : t('fileViewer.exportPptxNa'));
+                    if (!res.ok) {
+                      // `unavailable` covers two very different situations and
+                      // used to share one message: a runtime with no off-screen
+                      // renderer (permanent, 501) and a daemon we could not
+                      // reach at all (transient, says nothing about support).
+                      // Telling a user with a dead daemon that the feature is
+                      // "not available here" sends them to the wrong problem.
+                      throw new Error(
+                        'error' in res
+                          ? res.error
+                          : res.reason === 'unreachable'
+                            ? t('fileViewer.exportDaemonUnreachable')
+                            : t('fileViewer.exportPptxNa'),
+                      );
+                    }
                   });
                 }}
               >

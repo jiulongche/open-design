@@ -3252,6 +3252,7 @@ export const ptBR: Dict = {
   'fileViewer.exportPptxBusy': 'Aguarde o turno atual terminar.',
   'fileViewer.exportPptxHint': 'Envie uma solicitação ao agente para converter este design em PPTX.',
   'fileViewer.exportPptxNa': 'Exportação PPTX não está disponível aqui.',
+  'fileViewer.exportDaemonUnreachable': 'Não foi possível acessar o daemon. Tente novamente.',
   'fileViewer.exportZip': 'Baixar como .zip',
   'fileViewer.exportHtml': 'Exportar como HTML independente',
   'fileViewer.exportMd': 'Exportar como Markdown',

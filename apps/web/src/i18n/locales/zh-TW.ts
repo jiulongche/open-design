@@ -3434,6 +3434,7 @@ export const zhTW: Dict = {
   "fileViewer.exportPptxBusy": "請等待當前任務完成。",
   "fileViewer.exportPptxHint": "請求代理將此設計轉換為 PPTX。",
   "fileViewer.exportPptxNa": "此處暫不支援匯出 PPTX。",
+  'fileViewer.exportDaemonUnreachable': '無法連線到 daemon，請重試。',
   "fileViewer.exportZip": "下載為 .zip",
   "fileViewer.exportHtml": "匯出為獨立 HTML",
   "fileViewer.exportMd": "匯出為 Markdown",

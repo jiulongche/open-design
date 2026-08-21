@@ -3252,6 +3252,7 @@ export const id: Dict = {
   'fileViewer.exportPptxBusy': 'Mengekspor PPTX...',
   'fileViewer.exportPptxHint': 'Buat deck terlebih dahulu untuk mengekspor PPTX.',
   'fileViewer.exportPptxNa': 'PPTX tidak tersedia',
+  'fileViewer.exportDaemonUnreachable': 'Tidak dapat menghubungi daemon. Silakan coba lagi.',
   'fileViewer.exportZip': 'Ekspor ZIP',
   'fileViewer.exportHtml': 'Ekspor HTML',
   'fileViewer.exportMd': 'Ekspor Markdown',

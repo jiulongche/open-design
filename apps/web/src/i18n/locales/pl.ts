@@ -3252,6 +3252,7 @@ export const pl: Dict = {
   'fileViewer.exportPptxBusy': 'Poczekaj, aż bieżąca tura zostanie zakończona.',
   'fileViewer.exportPptxHint': 'Wyślij prośbę do agenta o przekonwertowanie tego projektu na PPTX.',
   'fileViewer.exportPptxNa': 'Eksport do PPTX nie jest tutaj dostępny.',
+  'fileViewer.exportDaemonUnreachable': 'Nie można połączyć się z daemonem. Spróbuj ponownie.',
   'fileViewer.exportZip': 'Pobierz jako .zip',
   'fileViewer.exportHtml': 'Eksportuj jako samodzielny HTML',
   'fileViewer.exportMd': 'Eksportuj jako Markdown',

@@ -3425,6 +3425,7 @@ export const zhCN: Dict = {
   "fileViewer.exportPptxBusy": "请等待当前任务完成。",
   "fileViewer.exportPptxHint": "请求代理将此设计转换为 PPTX。",
   "fileViewer.exportPptxNa": "此处暂不支持导出 PPTX。",
+  'fileViewer.exportDaemonUnreachable': '无法连接到 daemon，请重试。',
   "fileViewer.exportZip": "下载为 .zip",
   "fileViewer.exportHtml": "导出为独立 HTML",
   "fileViewer.exportMd": "导出为 Markdown",

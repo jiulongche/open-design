@@ -921,9 +921,27 @@ export async function exportProjectAsZip(opts: {
 // renderer-side 502, "page too tall", …), which must be surfaced rather than
 // silently masked by the old vector path (which can reintroduce the CJK-glyph /
 // fidelity bugs this screenshot path exists to avoid).
+/**
+ * Why the off-screen renderer could not be used. Both values keep
+ * `unavailable: true` so the existing fallback checks (`'unavailable' in res`)
+ * still classify them as "renderer not usable, you may fall back", but callers
+ * that surface a message can now tell the two apart:
+ *
+ * - `no-renderer` — the daemon answered 501: this runtime has no off-screen
+ *   renderer at all. Permanent until the deployment changes.
+ * - `unreachable` — the request never got an answer (daemon down, connection
+ *   dropped). Says nothing about whether the feature exists, and is very likely
+ *   transient.
+ *
+ * They were previously collapsed into one flag, so a dead daemon was reported
+ * to the user as "this export is not available here" — a claim about the
+ * product when the real problem was the connection.
+ */
+export type ExportUnavailableReason = 'no-renderer' | 'unreachable';
+
 export type ProjectScreenshotExportResult =
   | { ok: true }
-  | { ok: false; unavailable: true }
+  | { ok: false; unavailable: true; reason: ExportUnavailableReason }
   | { ok: false; error: string };
 
 // Programmatic screenshot-based PPTX export. POSTs to the daemon, which renders
@@ -970,13 +988,13 @@ export async function exportProjectAsPptx(opts: {
   } catch {
     // Transport-level failure (offline, daemon down) — genuinely unavailable, so
     // the caller may fall back to the vector/browser PDF.
-    return { ok: false, unavailable: true };
+    return { ok: false, unavailable: true, reason: 'unreachable' };
   }
   if (!resp.ok) {
     // 501 = this runtime has no off-screen renderer → caller may fall back to
     // the vector/browser PDF. Everything else is a real (semantic) failure that
     // must surface, not be masked by the vector path.
-    if (resp.status === 501) return { ok: false, unavailable: true };
+    if (resp.status === 501) return { ok: false, unavailable: true, reason: 'no-renderer' };
     let message = `export request failed (${resp.status})`;
     try {
       const err = await resp.json();
@@ -1085,7 +1103,7 @@ export function planDeckImageCapture(opts: {
 // must be surfaced rather than silently downgraded to a partial viewport shot.
 export type ProjectImageExportResult =
   | { ok: true; snapshot: PreviewSnapshot }
-  | { ok: false; unavailable: true }
+  | { ok: false; unavailable: true; reason: ExportUnavailableReason }
   // `code` / `status` carry the daemon's own classification through to the
   // caller. Dropping them (as this used to) forced `exportErrorCode` to
   // re-derive a code by regex-matching the message, and anything it could not
@@ -1127,11 +1145,11 @@ export async function exportProjectImageDataUrl(opts: {
   } catch {
     // Transport-level failure (offline, daemon down) — genuinely unavailable, so
     // the caller may fall back to a visible-preview capture.
-    return { ok: false, unavailable: true };
+    return { ok: false, unavailable: true, reason: 'unreachable' };
   }
   if (!resp.ok) {
     // 501 = this runtime has no off-screen renderer → caller may fall back.
-    if (resp.status === 501) return { ok: false, unavailable: true };
+    if (resp.status === 501) return { ok: false, unavailable: true, reason: 'no-renderer' };
     let message = `image export failed (${resp.status})`;
     let code: string | undefined;
     try {

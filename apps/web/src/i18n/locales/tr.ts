@@ -3252,6 +3252,7 @@ export const tr: Dict = {
   'fileViewer.exportPptxBusy': 'Güncel sıranın bitmesini bekleyin.',
   'fileViewer.exportPptxHint': 'Bu tasarımı PPTX’e dönüştürmesi için ajana bir istek yollayın.',
   'fileViewer.exportPptxNa': 'PPTX dışa aktarma burada mevcut değil.',
+  'fileViewer.exportDaemonUnreachable': 'Daemon\'a ulaşılamadı. Lütfen tekrar deneyin.',
   'fileViewer.exportZip': 'ZIP olarak indir',
   'fileViewer.exportHtml': 'Tekil HTML olarak dışa aktar',
   'fileViewer.exportMd': 'Markdown olarak dışa aktar',

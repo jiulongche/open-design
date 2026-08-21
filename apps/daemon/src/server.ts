@@ -7322,7 +7322,17 @@ export async function startServer({
 
   app.get('/api/version', async (_req, res) => {
     const version = await readCurrentAppVersionInfo();
-    res.json({ version });
+    // Runtime capabilities ride along on the version payload rather than a
+    // dedicated endpoint: this is already the "what runtime am I talking to"
+    // channel (packaged/channel/platform/arch), the web fetches it once at
+    // boot, and computing the flag from the very binding the export routes
+    // guard on means the advertisement cannot drift from the 501 they return.
+    res.json({
+      version: {
+        ...version,
+        capabilities: { slideRenderer: typeof desktopSlideRenderer === 'function' },
+      },
+    });
   });
 
   // Powered-preview isolation info. Reports the daemon's own directly-reachable

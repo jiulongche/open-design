@@ -3252,6 +3252,7 @@ export const th: Dict = {
   'fileViewer.exportPptxBusy': 'ต้องให้ทำระบบของปัจจุบันจนสำเร็จก่อน',
   'fileViewer.exportPptxHint': 'ส่งข้อมูลเพื่อให้ทำการแปลเอกสารเป็น PPTX',
   'fileViewer.exportPptxNa': 'งาน PPTX ไม่สามารถดึงออกในจุดนี้ได้',
+  'fileViewer.exportDaemonUnreachable': 'ไม่สามารถเชื่อมต่อกับ daemon ได้ กรุณาลองใหม่อีกครั้ง',
   'fileViewer.exportZip': 'สูบทั้งหมดมาในรูป .zip',
   'fileViewer.exportHtml': 'เอาไปแค่รูปไฟล์ HTML',
   'fileViewer.exportMd': 'แปลงข้อความแบบฉบับเป็น Markdown',

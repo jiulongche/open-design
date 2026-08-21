@@ -3252,6 +3252,7 @@ export const uk: Dict = {
   'fileViewer.exportPptxBusy': 'Чекайте, поки поточна черга завершиться.',
   'fileViewer.exportPptxHint': 'Надішліть запит агентові для перетворення цього дизайну на PPTX.',
   'fileViewer.exportPptxNa': 'Експорт PPTX недоступний тут.',
+  'fileViewer.exportDaemonUnreachable': 'Не вдалося з\'єднатися з daemon. Спробуйте ще раз.',
   'fileViewer.exportZip': 'Завантажити як .zip',
   'fileViewer.exportHtml': 'Експортувати як самостійний HTML',
   'fileViewer.exportMd': 'Експортувати як Markdown',

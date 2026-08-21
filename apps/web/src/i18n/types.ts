@@ -4113,6 +4113,7 @@ export interface Dict {
   'fileViewer.exportPptxBusy': string;
   'fileViewer.exportPptxHint': string;
   'fileViewer.exportPptxNa': string;
+  'fileViewer.exportDaemonUnreachable': string;
   'fileViewer.exportZip': string;
   'fileViewer.exportHtml': string;
   'fileViewer.exportMd': string;

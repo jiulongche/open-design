@@ -37,6 +37,7 @@ import type {
 } from '@open-design/contracts';
 import type {
   AgentInfo,
+  AppRuntimeCapabilities,
   AppVersionInfo,
   AppVersionResponse,
   WhatsNewResponse,
@@ -1495,6 +1496,14 @@ export async function cancelConnectorAuthorization(connectorId: string): Promise
 function isAppVersionInfo(value: unknown): value is AppVersionInfo {
   if (!value || typeof value !== 'object') return false;
   const candidate = value as Partial<AppVersionInfo>;
+  // `capabilities` is deliberately not required here. A daemon older than the
+  // field simply omits it, and rejecting the whole payload over an absent
+  // optional would take the version banner down with it. A present-but-wrong
+  // shape is dropped rather than trusted, so callers only ever see a valid
+  // object or `undefined` — never a half-filled one.
+  if (candidate.capabilities !== undefined && !isAppRuntimeCapabilities(candidate.capabilities)) {
+    return false;
+  }
   return (
     typeof candidate.version === 'string' &&
     typeof candidate.channel === 'string' &&
@@ -1502,6 +1511,11 @@ function isAppVersionInfo(value: unknown): value is AppVersionInfo {
     typeof candidate.platform === 'string' &&
     typeof candidate.arch === 'string'
   );
+}
+
+function isAppRuntimeCapabilities(value: unknown): value is AppRuntimeCapabilities {
+  if (!value || typeof value !== 'object') return false;
+  return typeof (value as Partial<AppRuntimeCapabilities>).slideRenderer === 'boolean';
 }
 
 export async function fetchAppVersionInfo(): Promise<AppVersionInfo | null> {
