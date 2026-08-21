@@ -140,16 +140,25 @@ export function useSlideRendererAvailable(): boolean | null {
   const [available, setAvailable] = useState<boolean | null>(cached);
 
   useEffect(() => {
-    if (cached !== null) {
-      setAvailable(cached);
-      return;
-    }
-
     let cancelled = false;
     const listener: Listener = (value) => {
       if (!cancelled) setAvailable(value);
     };
+    // Subscribe unconditionally, even when the cache is already resolved. An
+    // early return here would leave a viewer that mounted while the answer was
+    // `false` unable to hear the invalidation when a later daemon stops
+    // advertising the field — its entry would stay hidden against a daemon the
+    // contract says is unknown, which is the bug the invalidation exists to
+    // prevent, just moved one layer out.
     listeners.add(listener);
+    setAvailable(cached);
+
+    if (cached !== null) {
+      return () => {
+        cancelled = true;
+        listeners.delete(listener);
+      };
+    }
 
     void (async () => {
       for (let attempt = 0; ; attempt += 1) {

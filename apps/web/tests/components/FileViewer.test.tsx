@@ -6679,6 +6679,51 @@ describe('FileViewer SVG artifacts', () => {
     }
   });
 
+  it('restores the PPTX entry when a mounted viewer sees the capability go unknown', async () => {
+    // A viewer that mounted while the answer was already `false` still has to
+    // hear the invalidation, or it keeps the entry hidden against a daemon the
+    // compatibility contract says we know nothing about.
+    resetSlideRendererAvailableCache();
+    recordAppVersionInfo({
+      version: '1.2.3', channel: 'stable', packaged: false, platform: 'linux', arch: 'x64',
+      capabilities: { slideRenderer: false },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ version: {} }), { status: 200 })));
+    const file = baseFile({
+      name: 'slides.html', path: 'slides.html', mime: 'text/html', kind: 'html',
+      artifactManifest: {
+        version: 1, kind: 'html', title: 'Slides', entry: 'slides.html',
+        renderer: 'html', exports: ['html'],
+      },
+    });
+
+    try {
+      render(
+        <FileViewer
+          projectId="project-1"
+          projectKind="prototype"
+          file={file}
+          liveHtml='<html><body><section data-screen-label="One">One</section></body></html>'
+        />,
+      );
+
+      await openUnifiedExportTab();
+      expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
+
+      await act(async () => {
+        recordAppVersionInfo({
+          version: '1.2.4', channel: 'stable', packaged: false, platform: 'linux', arch: 'x64',
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
+      });
+    } finally {
+      resetSlideRendererAvailableCache();
+    }
+  });
+
   it('opens a PPTX mode dialog in a browser and defaults to editable export', async () => {
     const originalCreateObjectUrl = URL.createObjectURL;
     const originalRevokeObjectUrl = URL.revokeObjectURL;
