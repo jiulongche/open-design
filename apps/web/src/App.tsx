@@ -1266,15 +1266,21 @@ function AppInner() {
   // life of the page — and since unknown deliberately fails open, a headless
   // daemon keeps offering exports it can only answer with 501.
   //
-  // Retrying on a dependency change is not enough: a failed probe changes
-  // nothing, so nothing re-triggers and the failure is sticky. The retry has
-  // to schedule its own next attempt. Bounded and backing off, because an
-  // unreachable daemon is its own visible problem and must not be polled
-  // forever; it stops the moment an answer arrives.
+  // Retrying on a dependency change cannot recover from this: a failed probe
+  // changes nothing, so nothing re-triggers. The retry schedules its own next
+  // attempt.
+  //
+  // The interval is capped rather than the attempt count. A bounded number of
+  // attempts reintroduces the same hole it was meant to close — once they are
+  // spent, `daemonLive` never flips again and nothing can ever ask, so the
+  // gate stays defeated for the life of the page. Backing off to a slow steady
+  // interval keeps the cost negligible (it only runs while the answer is
+  // unknown, and stops on the first answer) and leaves no permanent hole.
   useEffect(() => {
     if (!daemonLive || appVersionInfo) return;
     let cancelled = false;
-    const delaysMs = [500, 1_500, 4_000, 10_000];
+    const backoffMs = [500, 1_500, 4_000, 10_000];
+    const steadyMs = 30_000;
     void (async () => {
       for (let attempt = 0; !cancelled; attempt += 1) {
         const info = await fetchAppVersionInfo();
@@ -1283,8 +1289,7 @@ function AppInner() {
           setAppVersionInfo(info);
           return;
         }
-        const delay = delaysMs[attempt];
-        if (delay === undefined) return;
+        const delay = backoffMs[attempt] ?? steadyMs;
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     })();
