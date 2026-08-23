@@ -6770,6 +6770,52 @@ describe('FileViewer SVG artifacts', () => {
     });
   });
 
+  it('re-probes the PPTX capability when the popover switches from Share to Export', async () => {
+    // The popover shell can sit open on the Share tab across a daemon swap, so
+    // the export surface's opening is the tab becoming visible, not the shell
+    // opening. As with reopening, the observable stale direction is a
+    // lingering `false`: without a tab-keyed probe it keeps hiding the entry
+    // when the tab returns to Export, while a fresh opening must start from
+    // unknown (fail open) until the new daemon answers.
+    let call = 0;
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    stubVersionFetch(async () => {
+      call += 1;
+      if (call === 1) return versionResponse({ slideRenderer: false });
+      await secondGate;
+      return versionResponse({ slideRenderer: false });
+    });
+    render(
+      <FileViewer projectId="project-1" projectKind="prototype" file={deckFile()} liveHtml={DECK_HTML} />,
+    );
+
+    await openUnifiedExportTab();
+    await waitFor(() => {
+      expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
+    });
+
+    // Switch to Share (export entries leave the tree), then back to Export
+    // while the new daemon's answer is still outstanding.
+    await openUnifiedShareTab();
+    await waitFor(() => {
+      expect(screen.queryByRole('menuitem', { name: /Export as PDF/i })).toBeNull();
+    });
+    await openUnifiedExportTab();
+
+    expect(await screen.findByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
+    expect(call).toBe(2);
+
+    await act(async () => {
+      releaseSecond();
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
+    });
+  });
+
   it('revalidates the PPTX capability at the menu-to-modal handoff', async () => {
     // Clicking the PPTX row closes the menu and opens the modal in one
     // batched update, so an OR of the two surfaces never changes and would

@@ -9077,12 +9077,15 @@ function HtmlViewer({
   // opens, and let the answer live no longer than that surface. This is the
   // whole capability contract, stated once:
   //
-  //   1. An answer never outlives the surface opening that fetched it. Every
-  //      opening starts from unknown and asks again — including the
-  //      menu-to-modal handoff. The PPTX row's click closes the menu and opens
-  //      the modal in one batched update, so an OR of the two surfaces never
-  //      changes across that handoff; the effect depends on the two booleans
-  //      themselves so the handoff re-runs it.
+  //   1. An answer never outlives the surface opening that fetched it. The
+  //      export surface is the popover's Export tab or the PPTX modal — not
+  //      the popover shell, which can open on Share and sit there across a
+  //      daemon swap before the tab is switched. Every way the surface can
+  //      become visible (opening onto the Export tab, switching Share to
+  //      Export, the menu-to-modal handoff) starts from unknown and asks
+  //      again. Transitions arrive as batched updates whose OR can stay
+  //      unchanged, so the effect depends on the raw inputs, not a derived
+  //      boolean.
   //   2. Unknown fails open. A pending probe and a daemon predating the
   //      capability field both show the entry; only a resolved `false` — from
   //      this daemon, during this opening — hides it.
@@ -9096,7 +9099,9 @@ function HtmlViewer({
   // exists to avoid.
   const [slideRendererAvailable, setSlideRendererAvailable] = useState<boolean | null>(null);
   useEffect(() => {
-    if (!deployMenuOpen && !pptxExportModalOpen) return;
+    const exportSurfaceVisible =
+      (deployMenuOpen && unifiedActionTab === 'export') || pptxExportModalOpen;
+    if (!exportSurfaceVisible) return;
     let cancelled = false;
     setSlideRendererAvailable(null);
     void fetchAppVersionInfo().then((info) => {
@@ -9107,7 +9112,7 @@ function HtmlViewer({
     return () => {
       cancelled = true;
     };
-  }, [deployMenuOpen, pptxExportModalOpen]);
+  }, [deployMenuOpen, unifiedActionTab, pptxExportModalOpen]);
   const [pptxExportMode, setPptxExportMode] = useState<'editable' | 'screenshot'>('editable');
   const imageExportSnapshotDataUrlRef = useRef<string | null>(null);
   // Threads the share-popover click → artifact_export_result(image) pair, the
