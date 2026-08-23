@@ -2188,7 +2188,13 @@ function AppInner() {
 
       void fetchAppVersionInfo().then((info) => {
         if (cancelled) return;
-        setAppVersionInfo(info);
+        // Two writers reach this state: this boot pass and the capability
+        // retry below. Never clobber with `null` — a boot response that fails
+        // late would otherwise erase an answer the retry already obtained and
+        // reopen the fail-open export entry — and never overwrite an answer
+        // that is already there, since a slow boot response is by definition
+        // the older of the two.
+        if (info) setAppVersionInfo((prev) => prev ?? info);
       });
 
       // Daemon-persisted config + composio config + media provider config land

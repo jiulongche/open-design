@@ -38,6 +38,16 @@ describe('/api/version', () => {
   // Advertising anything else would let the UI offer an export the daemon then
   // refuses, which is the bug this flag exists to prevent — so the two specs
   // below pin the flag to that binding from both sides.
+  it('forbids caching now that the payload carries a runtime capability', async () => {
+    // Same URL, different answer depending on which daemon is behind it. A
+    // cached response outlives the daemon that produced it, and a stale
+    // `slideRenderer: true` would be consumed as authoritative — reopening the
+    // export the gate exists to hide.
+    const res = await fetch(`${baseUrl}/api/version`);
+
+    expect(res.headers.get('cache-control')).toBe('no-store');
+  });
+
   it('reports no slide renderer when the daemon runs without one', async () => {
     const res = await fetch(`${baseUrl}/api/version`);
     const json = await res.json() as { version?: { capabilities?: { slideRenderer?: boolean } } };

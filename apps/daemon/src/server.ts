@@ -7322,6 +7322,13 @@ export async function startServer({
 
   app.get('/api/version', async (_req, res) => {
     const version = await readCurrentAppVersionInfo();
+    // Now that this payload carries a runtime capability it is no longer a
+    // near-static fact about the build: the same URL answers differently
+    // depending on which daemon is behind it. A cached response therefore
+    // outlives the daemon that produced it, and a stale `slideRenderer: true`
+    // is consumed as authoritative — reopening the export the gate exists to
+    // hide. Must not be cached anywhere.
+    res.setHeader('Cache-Control', 'no-store');
     // Runtime capabilities ride along on the version payload rather than a
     // dedicated endpoint: this is already the "what runtime am I talking to"
     // channel (packaged/channel/platform/arch), the web fetches it once at
