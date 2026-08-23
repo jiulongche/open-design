@@ -6614,46 +6614,199 @@ describe('FileViewer SVG artifacts', () => {
     }
   });
 
-  // The gate asks the daemon when the export surface is opened and keeps the
-  // answer no longer than that, so the three contract states are three
-  // responses to that one probe.
-  it.each([
-    ['hides the PPTX entry when the daemon reports no renderer', { slideRenderer: false }, true],
-    ['offers it when the daemon reports one', { slideRenderer: true }, false],
-    ['offers it while the capability is unknown', undefined, false],
-  ])('%s', async (_name, capabilities, expectHidden) => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
-      version: {
-        version: '1.2.3', channel: 'stable', packaged: false, platform: 'linux', arch: 'x64',
-        ...(capabilities ? { capabilities } : {}),
-      },
-    }), { status: 200, headers: { 'content-type': 'application/json' } })));
-
-    const file = baseFile({
-      name: 'slides.html', path: 'slides.html', mime: 'text/html', kind: 'html',
+  // The capability probe contract under test (see the effect in FileViewer):
+  // unknown — a pending probe or an absent field — fails open; only a resolved
+  // `false` hides the entry; and no answer outlives the surface opening that
+  // fetched it, so reopening starts from unknown and the menu-to-modal
+  // handoff revalidates. The positive cases hold the response open before
+  // asserting: asserting right after opening passes vacuously, because
+  // pending fails open by design.
+  const deckFile = () =>
+    baseFile({
+      name: 'slides.html',
+      path: 'slides.html',
+      mime: 'text/html',
+      kind: 'html',
       artifactManifest: {
-        version: 1, kind: 'html', title: 'Slides', entry: 'slides.html',
-        renderer: 'html', exports: ['html'],
+        version: 1,
+        kind: 'html',
+        title: 'Slides',
+        entry: 'slides.html',
+        renderer: 'html',
+        exports: ['html'],
       },
     });
+  const DECK_HTML = '<html><body><section data-screen-label="One">One</section></body></html>';
+  const versionResponse = (capabilities?: { slideRenderer: boolean }) =>
+    new Response(
+      JSON.stringify({
+        version: {
+          version: '1.2.3',
+          channel: 'stable',
+          packaged: false,
+          platform: 'linux',
+          arch: 'x64',
+          ...(capabilities ? { capabilities } : {}),
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  const stubVersionFetch = (handler: () => Response | Promise<Response>) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).includes('/api/version')
+          ? handler()
+          : new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
+      ),
+    );
+  };
 
+  it('hides the PPTX entry once the daemon answers that it has no renderer', async () => {
+    stubVersionFetch(() => versionResponse({ slideRenderer: false }));
     render(
-      <FileViewer
-        projectId="project-1"
-        projectKind="prototype"
-        file={file}
-        liveHtml='<html><body><section data-screen-label="One">One</section></body></html>'
-      />,
+      <FileViewer projectId="project-1" projectKind="prototype" file={deckFile()} liveHtml={DECK_HTML} />,
     );
 
     await openUnifiedExportTab();
-    if (expectHidden) {
-      await waitFor(() => {
-        expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
-      });
-    } else {
-      expect(screen.getByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
-    }
+
+    await waitFor(() => {
+      expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
+    });
+  });
+
+  it('keeps the PPTX entry after the daemon answers true', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    stubVersionFetch(async () => {
+      await gate;
+      return versionResponse({ slideRenderer: true });
+    });
+    render(
+      <FileViewer projectId="project-1" projectKind="prototype" file={deckFile()} liveHtml={DECK_HTML} />,
+    );
+
+    await openUnifiedExportTab();
+    // Pending: fails open by contract.
+    expect(screen.getByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
+
+    await act(async () => {
+      release();
+      await gate;
+    });
+    expect(screen.getByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
+  });
+
+  it('keeps the PPTX entry when the capability field is absent', async () => {
+    // A daemon predating the field must read as unknown, never as false. The
+    // assertion runs after the response has resolved — the flip red-check
+    // (absent mapped to false) turns exactly this spec red, which is what
+    // proves the timing observes the resolved state rather than the pending
+    // fail-open.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    stubVersionFetch(async () => {
+      await gate;
+      return versionResponse();
+    });
+    render(
+      <FileViewer projectId="project-1" projectKind="prototype" file={deckFile()} liveHtml={DECK_HTML} />,
+    );
+
+    await openUnifiedExportTab();
+    await act(async () => {
+      release();
+      await gate;
+    });
+    expect(screen.getByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
+  });
+
+  it('starts a reopened menu from unknown instead of the previous PPTX answer', async () => {
+    // The observable stale direction is a lingering `false`. A stale `true`
+    // is indistinguishable from a pending probe — both fail open — which is
+    // why a true-then-swap version of this test asserts nothing. A stale
+    // `false` from the previous daemon, though, would wrongly keep the entry
+    // hidden on reopen while the new daemon's answer is still outstanding.
+    let call = 0;
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    stubVersionFetch(async () => {
+      call += 1;
+      if (call === 1) return versionResponse({ slideRenderer: false });
+      await secondGate;
+      return versionResponse({ slideRenderer: false });
+    });
+    render(
+      <FileViewer projectId="project-1" projectKind="prototype" file={deckFile()} liveHtml={DECK_HTML} />,
+    );
+
+    await openUnifiedExportTab();
+    await waitFor(() => {
+      expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
+    });
+
+    // The toolbar button toggles: close, then reopen while the new answer is
+    // still outstanding.
+    await openUnifiedExportTab();
+    await waitFor(() => {
+      expect(screen.queryByRole('menuitem', { name: /Export as PDF/i })).toBeNull();
+    });
+    await openUnifiedExportTab();
+
+    // Unknown fails open: the previous daemon's false must not leak in.
+    expect(await screen.findByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
+
+    await act(async () => {
+      releaseSecond();
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
+    });
+  });
+
+  it('revalidates the PPTX capability at the menu-to-modal handoff', async () => {
+    // Clicking the PPTX row closes the menu and opens the modal in one
+    // batched update, so an OR of the two surfaces never changes and would
+    // skip this probe entirely — the effect depends on both booleans for
+    // exactly this moment. The fresh `false` must disable the modal's
+    // confirm; without revalidation the menu-opening's `true` would keep it
+    // enabled and the confirm would POST straight into the 501 this gate
+    // exists to prevent.
+    let call = 0;
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    stubVersionFetch(async () => {
+      call += 1;
+      if (call === 1) return versionResponse({ slideRenderer: true });
+      await secondGate;
+      return versionResponse({ slideRenderer: false });
+    });
+    render(
+      <FileViewer projectId="project-1" projectKind="prototype" file={deckFile()} liveHtml={DECK_HTML} />,
+    );
+
+    await openUnifiedExportTab();
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Export as PPTX/i }));
+
+    const dialog = await screen.findByRole('dialog', { name: /Export as PPTX/i });
+    await waitFor(() => expect(call).toBe(2));
+
+    const confirm = within(dialog).getByRole('button', { name: /^Export$/i }) as HTMLButtonElement;
+    // Pending fails open, by contract.
+    expect(confirm.disabled).toBe(false);
+
+    await act(async () => {
+      releaseSecond();
+    });
+    await waitFor(() => expect(confirm.disabled).toBe(true));
   });
 
   it('opens a PPTX mode dialog in a browser and defaults to editable export', async () => {

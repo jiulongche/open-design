@@ -7859,37 +7859,6 @@ function HtmlViewer({
   // active tab is `unifiedActionTab`. External share/download requests below just
   // preselect the tab and open this one popover.
   const [deployMenuOpen, setDeployMenuOpen] = useState(false);
-  // Ask the daemon whether it can render slides only when the export surface is
-  // actually opened, and keep the answer no longer than that. Maintaining a
-  // background copy of this fact is what produced the whole family of staleness
-  // problems this gate went through: cache coherence, write ordering, HTTP
-  // caching, liveness-change refresh. None of them exist for an answer that is
-  // fetched at the moment it is used and discarded with the menu — if the
-  // daemon is swapped, the next open simply asks again.
-  //
-  // `null` while the answer is outstanding, which fails open exactly as an
-  // older daemon's absent field does. That window is one round trip inside a
-  // single menu opening; unlike the background copy it cannot get stuck,
-  // because nothing carries it forward.
-  const [slideRendererAvailable, setSlideRendererAvailable] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (!deployMenuOpen) return;
-    let cancelled = false;
-    // Start every opening from unknown. The state outlives the menu (the
-    // component stays mounted), so without this the previous opening's answer
-    // is still here on reopen — and if the daemon was replaced in between,
-    // that answer now describes a daemon that is gone. "Discarded with the
-    // menu" has to be enforced, not just intended.
-    setSlideRendererAvailable(null);
-    void fetchAppVersionInfo().then((info) => {
-      if (cancelled) return;
-      const next = info?.capabilities?.slideRenderer;
-      setSlideRendererAvailable(typeof next === 'boolean' ? next : null);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [deployMenuOpen]);
   const [unifiedActionTab, setUnifiedActionTab] = useState<'share' | 'export'>('share');
   const [shareAccess, setShareAccess] = useState<'private' | 'workspace'>('private');
   const [shareAccessMenuOpen, setShareAccessMenuOpen] = useState(false);
@@ -9104,6 +9073,41 @@ function HtmlViewer({
   const [imageExportFormat, setImageExportFormat] = useState<ImageExportFormat>('png');
   const [imageExportError, setImageExportError] = useState<string | null>(null);
   const [pptxExportModalOpen, setPptxExportModalOpen] = useState(false);
+  // Ask the daemon whether it can render slides each time an export surface
+  // opens, and let the answer live no longer than that surface. This is the
+  // whole capability contract, stated once:
+  //
+  //   1. An answer never outlives the surface opening that fetched it. Every
+  //      opening starts from unknown and asks again — including the
+  //      menu-to-modal handoff. The PPTX row's click closes the menu and opens
+  //      the modal in one batched update, so an OR of the two surfaces never
+  //      changes across that handoff; the effect depends on the two booleans
+  //      themselves so the handoff re-runs it.
+  //   2. Unknown fails open. A pending probe and a daemon predating the
+  //      capability field both show the entry; only a resolved `false` — from
+  //      this daemon, during this opening — hides it.
+  //   3. The daemon stays the authority of last resort. A swap after the
+  //      probe resolves is unclosable client-side (time-of-check vs
+  //      time-of-use); it is caught by the export POST itself, whose 501
+  //      surfaces the no-renderer message rather than a generic failure.
+  //
+  // Anything beyond this — background caches, retries, cross-surface
+  // carryover — reintroduces the replica-of-remote-state problem this shape
+  // exists to avoid.
+  const [slideRendererAvailable, setSlideRendererAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!deployMenuOpen && !pptxExportModalOpen) return;
+    let cancelled = false;
+    setSlideRendererAvailable(null);
+    void fetchAppVersionInfo().then((info) => {
+      if (cancelled) return;
+      const next = info?.capabilities?.slideRenderer;
+      setSlideRendererAvailable(typeof next === 'boolean' ? next : null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [deployMenuOpen, pptxExportModalOpen]);
   const [pptxExportMode, setPptxExportMode] = useState<'editable' | 'screenshot'>('editable');
   const imageExportSnapshotDataUrlRef = useRef<string | null>(null);
   // Threads the share-popover click → artifact_export_result(image) pair, the
