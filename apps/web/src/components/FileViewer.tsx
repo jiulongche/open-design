@@ -7875,6 +7875,12 @@ function HtmlViewer({
   useEffect(() => {
     if (!deployMenuOpen) return;
     let cancelled = false;
+    // Start every opening from unknown. The state outlives the menu (the
+    // component stays mounted), so without this the previous opening's answer
+    // is still here on reopen — and if the daemon was replaced in between,
+    // that answer now describes a daemon that is gone. "Discarded with the
+    // menu" has to be enforced, not just intended.
+    setSlideRendererAvailable(null);
     void fetchAppVersionInfo().then((info) => {
       if (cancelled) return;
       const next = info?.capabilities?.slideRenderer;
