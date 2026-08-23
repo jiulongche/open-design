@@ -1261,17 +1261,33 @@ function AppInner() {
 
 
   // The boot fetch is one-shot, and `fetchAppVersionInfo` yields null on any
-  // failed or non-OK response. Left there, a daemon that was merely slow to
-  // come up would leave every capability unknown for the life of the page —
-  // and since unknown deliberately fails open, a headless daemon would keep
-  // offering exports it can only answer with 501. Re-ask once the daemon is
-  // reachable, so a startup blip stops being permanent.
+  // failed, non-OK, or unparseable /api/version response. Left there, a daemon
+  // that was merely slow to come up leaves every capability unknown for the
+  // life of the page — and since unknown deliberately fails open, a headless
+  // daemon keeps offering exports it can only answer with 501.
+  //
+  // Retrying on a dependency change is not enough: a failed probe changes
+  // nothing, so nothing re-triggers and the failure is sticky. The retry has
+  // to schedule its own next attempt. Bounded and backing off, because an
+  // unreachable daemon is its own visible problem and must not be polled
+  // forever; it stops the moment an answer arrives.
   useEffect(() => {
     if (!daemonLive || appVersionInfo) return;
     let cancelled = false;
-    void fetchAppVersionInfo().then((info) => {
-      if (!cancelled && info) setAppVersionInfo(info);
-    });
+    const delaysMs = [500, 1_500, 4_000, 10_000];
+    void (async () => {
+      for (let attempt = 0; !cancelled; attempt += 1) {
+        const info = await fetchAppVersionInfo();
+        if (cancelled) return;
+        if (info) {
+          setAppVersionInfo(info);
+          return;
+        }
+        const delay = delaysMs[attempt];
+        if (delay === undefined) return;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    })();
     return () => {
       cancelled = true;
     };
