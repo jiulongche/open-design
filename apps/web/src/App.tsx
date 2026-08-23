@@ -1260,43 +1260,7 @@ function AppInner() {
   );
 
 
-  // The boot fetch is one-shot, and `fetchAppVersionInfo` yields null on any
-  // failed, non-OK, or unparseable /api/version response. Left there, a daemon
-  // that was merely slow to come up leaves every capability unknown for the
-  // life of the page — and since unknown deliberately fails open, a headless
-  // daemon keeps offering exports it can only answer with 501.
-  //
-  // Retrying on a dependency change cannot recover from this: a failed probe
-  // changes nothing, so nothing re-triggers. The retry schedules its own next
-  // attempt.
-  //
-  // The interval is capped rather than the attempt count. A bounded number of
-  // attempts reintroduces the same hole it was meant to close — once they are
-  // spent, `daemonLive` never flips again and nothing can ever ask, so the
-  // gate stays defeated for the life of the page. Backing off to a slow steady
-  // interval keeps the cost negligible (it only runs while the answer is
-  // unknown, and stops on the first answer) and leaves no permanent hole.
-  useEffect(() => {
-    if (!daemonLive || appVersionInfo) return;
-    let cancelled = false;
-    const backoffMs = [500, 1_500, 4_000, 10_000];
-    const steadyMs = 30_000;
-    void (async () => {
-      for (let attempt = 0; !cancelled; attempt += 1) {
-        const info = await fetchAppVersionInfo();
-        if (cancelled) return;
-        if (info) {
-          setAppVersionInfo(info);
-          return;
-        }
-        const delay = backoffMs[attempt] ?? steadyMs;
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [daemonLive, appVersionInfo]);  const [daemonMediaProviders, setDaemonMediaProviders] = useState<
+  const [daemonMediaProviders, setDaemonMediaProviders] = useState<
     AppConfig['mediaProviders'] | null
   >(null);
   const [daemonMediaProvidersFetchState, setDaemonMediaProvidersFetchState] = useState<
@@ -2188,13 +2152,7 @@ function AppInner() {
 
       void fetchAppVersionInfo().then((info) => {
         if (cancelled) return;
-        // Two writers reach this state: this boot pass and the capability
-        // retry below. Never clobber with `null` — a boot response that fails
-        // late would otherwise erase an answer the retry already obtained and
-        // reopen the fail-open export entry — and never overwrite an answer
-        // that is already there, since a slow boot response is by definition
-        // the older of the two.
-        if (info) setAppVersionInfo((prev) => prev ?? info);
+        setAppVersionInfo(info);
       });
 
       // Daemon-persisted config + composio config + media provider config land
@@ -5115,7 +5073,6 @@ function AppInner() {
   } else if (route.kind === 'design-system-detail') {
     appMain = (
       <DesignSystemDetailView
-        slideRendererAvailable={appVersionInfo?.capabilities?.slideRenderer ?? null}
         id={route.designSystemId}
         selectedId={config.designSystemId}
         config={config}
@@ -5231,7 +5188,6 @@ function AppInner() {
       appMain = (
         <div className="app">
         <ProjectView
-          slideRendererAvailable={appVersionInfo?.capabilities?.slideRenderer ?? null}
           key={projectViewAuthorizationLifetimeKey(
             activeProject.id,
             activeProjectWorkspaceContext,

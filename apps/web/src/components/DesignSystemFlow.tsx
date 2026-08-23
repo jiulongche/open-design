@@ -185,8 +185,6 @@ const SOURCE_FILE_DIALOG_WARMUP_MS = 450;
 const SOURCE_FILE_DIALOG_STALE_MS = 30_000;
 
 interface DetailProps {
-  /** Daemon-advertised slide-renderer capability; `null` = unknown = assume available. */
-  slideRendererAvailable?: boolean | null;
   id: string;
   selectedId: string | null;
   config: AppConfig;
@@ -1633,7 +1631,6 @@ function DesignMdValueChip({ label, value }: { label: string; value: string }) {
 }
 
 export function DesignSystemDetailView({
-  slideRendererAvailable = null,
   id,
   selectedId,
   config,
@@ -3066,7 +3063,6 @@ export function DesignSystemDetailView({
           <div className="ds-file-workspace-host">
             {workspaceProjectId ? (
               <FileWorkspace
-                slideRendererAvailable={slideRendererAvailable}
                 projectId={workspaceProjectId}
                 projectKind="prototype"
                 files={workspaceProjectFiles}

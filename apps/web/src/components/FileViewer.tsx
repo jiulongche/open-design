@@ -170,6 +170,7 @@ import {
   type ExportProgress,
   type ImageExportFormat,
 } from '../runtime/exports';
+import { fetchAppVersionInfo } from '../providers/registry';
 import { copyToClipboard } from '../lib/copy-to-clipboard';
 import { buildReactComponentSrcdoc } from '../runtime/react-component';
 import { shouldConsumeSlideNav } from '../runtime/slide-nav';
@@ -1810,15 +1811,6 @@ interface Props {
   artifactId?: string;
   artifactKind?: TrackingArtifactKind;
   metricsConsent?: boolean;
-  /**
-   * Whether the daemon can render slides off-screen — the capability behind
-   * PPTX export. `null` means unknown (a daemon predating the flag, or not
-   * answered yet) and must be treated as "assume available": hiding on absence
-   * would take a working export away from deployments that have not upgraded.
-   * Threaded from the app's existing /api/version state rather than fetched
-   * again here, so there is one answer rather than two that can disagree.
-   */
-  slideRendererAvailable?: boolean | null;
   installationId?: string | null;
   /** False while this viewer is retained offscreen for an instant tab revisit. */
   workspaceActive?: boolean;
@@ -1903,7 +1895,6 @@ export const FileViewer = memo(function FileViewer({
   artifactId,
   artifactKind,
   metricsConsent,
-  slideRendererAvailable = null,
   installationId,
   workspaceActive = true,
   onRetainActivityChange,
@@ -1964,7 +1955,6 @@ export const FileViewer = memo(function FileViewer({
   if (rendererMatch?.renderer.id === 'html' || rendererMatch?.renderer.id === 'deck-html') {
     return (
       <HtmlViewer
-        slideRendererAvailable={slideRendererAvailable}
         projectId={projectId}
         projectKind={projectKind}
         file={file}
@@ -7391,7 +7381,6 @@ function HtmlViewer({
   onRetainActivityChange,
   onManualEditExitHandlerChange,
   manualEditEntryAllowed = true,
-  slideRendererAvailable = null,
 }: {
   projectId: string;
   projectKind: TrackingProjectKind;
@@ -7423,8 +7412,6 @@ function HtmlViewer({
   artifactId?: string;
   artifactKind?: TrackingArtifactKind;
   metricsConsent?: boolean;
-  /** Daemon-advertised slide-renderer capability; `null` = unknown = assume available. */
-  slideRendererAvailable?: boolean | null;
   installationId?: string | null;
   workspaceActive?: boolean;
   onRetainActivityChange?: (fileName: string, retain: boolean) => void;
@@ -7872,6 +7859,31 @@ function HtmlViewer({
   // active tab is `unifiedActionTab`. External share/download requests below just
   // preselect the tab and open this one popover.
   const [deployMenuOpen, setDeployMenuOpen] = useState(false);
+  // Ask the daemon whether it can render slides only when the export surface is
+  // actually opened, and keep the answer no longer than that. Maintaining a
+  // background copy of this fact is what produced the whole family of staleness
+  // problems this gate went through: cache coherence, write ordering, HTTP
+  // caching, liveness-change refresh. None of them exist for an answer that is
+  // fetched at the moment it is used and discarded with the menu — if the
+  // daemon is swapped, the next open simply asks again.
+  //
+  // `null` while the answer is outstanding, which fails open exactly as an
+  // older daemon's absent field does. That window is one round trip inside a
+  // single menu opening; unlike the background copy it cannot get stuck,
+  // because nothing carries it forward.
+  const [slideRendererAvailable, setSlideRendererAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!deployMenuOpen) return;
+    let cancelled = false;
+    void fetchAppVersionInfo().then((info) => {
+      if (cancelled) return;
+      const next = info?.capabilities?.slideRenderer;
+      setSlideRendererAvailable(typeof next === 'boolean' ? next : null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [deployMenuOpen]);
   const [unifiedActionTab, setUnifiedActionTab] = useState<'share' | 'export'>('share');
   const [shareAccess, setShareAccess] = useState<'private' | 'workspace'>('private');
   const [shareAccessMenuOpen, setShareAccessMenuOpen] = useState(false);

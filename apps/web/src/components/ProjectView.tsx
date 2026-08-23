@@ -560,14 +560,6 @@ function ensureConversationPresent(
 interface Props {
   project: Project;
   /**
-   * Whether the daemon can render slides off-screen — the capability behind
-   * PPTX export. `null` means unknown and must be read as "assume available":
-   * hiding on absence would take a working export away from deployments that
-   * have not upgraded yet. Threaded from the app's existing /api/version state
-   * rather than fetched again, so there is one answer, not two that can differ.
-   */
-  slideRendererAvailable?: boolean | null;
-  /**
    * Exact project-bound Workspace authority resolved by the route gate.
    * Production deep links pass this instead of borrowing the shell's mutable
    * current/default Workspace. Tests and legacy embedded callers may omit it
@@ -1753,7 +1745,6 @@ export function reconcileProjectDetail(
 
 export function ProjectView({
   project,
-  slideRendererAvailable = null,
   workspaceContextOverride,
   initialWorkspaceScope,
   initialProjectDetail,
@@ -11383,7 +11374,6 @@ export function ProjectView({
           />
         ) : null}
         <FileWorkspace
-          slideRendererAvailable={slideRendererAvailable}
           projectId={project.id}
           projectName={currentProject.name}
           viewerOnly={projectMutationReadOnly}

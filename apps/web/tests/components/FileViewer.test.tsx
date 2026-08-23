@@ -6614,13 +6614,21 @@ describe('FileViewer SVG artifacts', () => {
     }
   });
 
-  // The gate reads a prop threaded from the app's existing /api/version state,
-  // so the three cases the contract cares about are just three renders.
+  // The gate asks the daemon when the export surface is opened and keeps the
+  // answer no longer than that, so the three contract states are three
+  // responses to that one probe.
   it.each([
-    ['hides the PPTX entry when the daemon reports no renderer', false, true],
-    ['offers it when the daemon reports one', true, false],
-    ['offers it while the capability is unknown', null, false],
-  ])('%s', async (_name, slideRendererAvailable, expectHidden) => {
+    ['hides the PPTX entry when the daemon reports no renderer', { slideRenderer: false }, true],
+    ['offers it when the daemon reports one', { slideRenderer: true }, false],
+    ['offers it while the capability is unknown', undefined, false],
+  ])('%s', async (_name, capabilities, expectHidden) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      version: {
+        version: '1.2.3', channel: 'stable', packaged: false, platform: 'linux', arch: 'x64',
+        ...(capabilities ? { capabilities } : {}),
+      },
+    }), { status: 200, headers: { 'content-type': 'application/json' } })));
+
     const file = baseFile({
       name: 'slides.html', path: 'slides.html', mime: 'text/html', kind: 'html',
       artifactManifest: {
@@ -6634,15 +6642,18 @@ describe('FileViewer SVG artifacts', () => {
         projectId="project-1"
         projectKind="prototype"
         file={file}
-        slideRendererAvailable={slideRendererAvailable as boolean | null}
         liveHtml='<html><body><section data-screen-label="One">One</section></body></html>'
       />,
     );
 
     await openUnifiedExportTab();
-    const entry = screen.queryByRole('menuitem', { name: /Export as PPTX/i });
-    if (expectHidden) expect(entry).toBeNull();
-    else expect(entry).toBeTruthy();
+    if (expectHidden) {
+      await waitFor(() => {
+        expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
+      });
+    } else {
+      expect(screen.getByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
+    }
   });
 
   it('opens a PPTX mode dialog in a browser and defaults to editable export', async () => {
