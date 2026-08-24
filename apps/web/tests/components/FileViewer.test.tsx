@@ -6770,6 +6770,42 @@ describe('FileViewer SVG artifacts', () => {
     });
   });
 
+  it('retries a failed PPTX probe while the export surface stays open', async () => {
+    // A transient /api/version failure (daemon still starting) must not pin
+    // this opening at unknown: unknown fails open, so without a retry the
+    // entry stays clickable in a headless runtime for the whole opening. A
+    // valid answer without the field (old daemon) is different — retrying
+    // cannot teach us more — which the absent-field spec above pins.
+    let call = 0;
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    stubVersionFetch(async () => {
+      call += 1;
+      if (call === 1) return new Response('boot', { status: 500 });
+      await secondGate;
+      return versionResponse({ slideRenderer: false });
+    });
+    render(
+      <FileViewer projectId="project-1" projectKind="prototype" file={deckFile()} liveHtml={DECK_HTML} />,
+    );
+
+    await openUnifiedExportTab();
+    // Failed probe: unknown fails open for now.
+    expect(screen.getByRole('menuitem', { name: /Export as PPTX/i })).toBeTruthy();
+
+    // The retry fires while the menu stays open.
+    await waitFor(() => expect(call).toBe(2), { timeout: 3_000 });
+
+    await act(async () => {
+      releaseSecond();
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('menuitem', { name: /Export as PPTX/i })).toBeNull();
+    });
+  });
+
   it('re-probes the PPTX capability when the popover switches from Share to Export', async () => {
     // The popover shell can sit open on the Share tab across a daemon swap, so
     // the export surface's opening is the tab becoming visible, not the shell

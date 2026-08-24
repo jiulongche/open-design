@@ -9104,11 +9104,28 @@ function HtmlViewer({
     if (!exportSurfaceVisible) return;
     let cancelled = false;
     setSlideRendererAvailable(null);
-    void fetchAppVersionInfo().then((info) => {
-      if (cancelled) return;
-      const next = info?.capabilities?.slideRenderer;
-      setSlideRendererAvailable(typeof next === 'boolean' ? next : null);
-    });
+    void (async () => {
+      // A probe that FAILS (daemon starting up, transient network) is retried
+      // briefly, because leaving the whole opening at unknown would fail open
+      // for its entire lifetime. A probe that SUCCEEDS without the capability
+      // field is an old daemon: asking again cannot teach us more, so it
+      // stops at unknown immediately. The retry lives and dies with this
+      // opening — cancelled on any surface transition — so nothing here
+      // crosses surfaces either.
+      const retryDelaysMs = [1_000, 3_000];
+      for (let attempt = 0; !cancelled; attempt += 1) {
+        const info = await fetchAppVersionInfo();
+        if (cancelled) return;
+        if (info) {
+          const next = info.capabilities?.slideRenderer;
+          setSlideRendererAvailable(typeof next === 'boolean' ? next : null);
+          return;
+        }
+        const delay = retryDelaysMs[attempt];
+        if (delay === undefined) return;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    })();
     return () => {
       cancelled = true;
     };
