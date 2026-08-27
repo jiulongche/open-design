@@ -2813,6 +2813,100 @@ export type DesktopFrameRenderer = (input: DesktopRenderFramesInput) => Promise<
 export type DesktopSlideRenderer = (input: DesktopRenderSlidesInput) => Promise<DesktopRenderSlidesResult>;
 export type DesktopArtifactExporter = (input: DesktopExportArtifactInput) => Promise<DesktopExportArtifactResult>;
 
+// Optional extension point for deployments with no Electron sidecar.
+//
+// `desktopSlideRenderer` is injected only when the daemon runs as the desktop
+// app's sidecar (apps/desktop). A headless daemon — `open-design` from a
+// terminal, a container image — therefore has no slide renderer at all, so
+// PPTX / raster-PDF / image export answer 501 and `capabilities.slideRenderer`
+// advertises false. That is the correct answer for a plain install, but it also
+// leaves an operator who IS willing to run a browser somewhere no way to say so.
+//
+// This fills the same binding from an operator-supplied HTTP endpoint. Unset
+// (the default) it returns null and nothing about the daemon changes: same 501,
+// same advertised capability, no new dependency, no new process.
+//
+// The two-process shape is not new here — the desktop build already asks
+// another process to render, over unix-socket JSON IPC
+// (packages/sidecar/src/json-ipc.ts). This swaps the transport for HTTP and
+// reuses DesktopRenderSlidesInput/Result verbatim, so an external renderer is
+// held to exactly the contract the Electron one already satisfies.
+const SLIDE_RENDERER_HTTP_TIMEOUT_MS = 600_000;
+// Rendered bytes come back as one binary frame rather than JSON: a deck export
+// is tens of MB of PNG, which base64 inflates by a third, and the alternative —
+// letting the renderer write into the daemon's data root — would mean mounting
+// that directory into the process that executes untrusted artifact JS. So the
+// bytes travel over HTTP and *the daemon* writes them into the outputDir it
+// chose. Frame layout:
+//   MAGIC(9B) | headerLen(uint32 BE) | header JSON | part0 | part1 | ...
+// where the header is a DesktopRenderSlidesResult plus a `parts` array of
+// `{name, bytes}` describing the payloads that follow, in order.
+const SLIDE_RENDERER_FRAME_MAGIC = 'ODRENDER1';
+
+export function httpSlideRendererFromEnv(
+  url = process.env.OD_SLIDE_RENDERER_URL,
+): DesktopSlideRenderer | null {
+  const base = (url || '').trim().replace(/\/+$/, '');
+  if (!base) return null;
+  return async (input: DesktopRenderSlidesInput): Promise<DesktopRenderSlidesResult> => {
+    const res = await fetch(`${base}/render-slides`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(input),
+      signal: AbortSignal.timeout(SLIDE_RENDERER_HTTP_TIMEOUT_MS),
+    });
+    // A non-2xx means the RENDERER is broken (down, overloaded, misconfigured) —
+    // a different thing from "this HTML cannot be rendered", and it needs a
+    // different action from whoever sees it. Throwing lets the export route
+    // report it as an upstream failure instead of dressing it up as a render
+    // result the user is expected to act on.
+    if (!res.ok) {
+      let detail = `slide renderer responded HTTP ${res.status}`;
+      try {
+        const body = (await res.json()) as { error?: unknown };
+        if (body?.error) detail = String(body.error);
+      } catch {
+        // Not a JSON error body — keep the status-code wording.
+      }
+      throw new Error(detail);
+    }
+    // A render that legitimately failed (no slides, page too tall) comes back as
+    // JSON in the contract's own shape, so the route maps it exactly as it maps
+    // the desktop renderer's.
+    if ((res.headers.get('content-type') || '').includes('application/json')) {
+      return (await res.json()) as DesktopRenderSlidesResult;
+    }
+    const frame = Buffer.from(await res.arrayBuffer());
+    if (frame.subarray(0, SLIDE_RENDERER_FRAME_MAGIC.length).toString('ascii') !== SLIDE_RENDERER_FRAME_MAGIC) {
+      throw new Error('slide renderer returned an unrecognised frame');
+    }
+    const headerStart = SLIDE_RENDERER_FRAME_MAGIC.length + 4;
+    const headerLen = frame.readUInt32BE(SLIDE_RENDERER_FRAME_MAGIC.length);
+    const header = JSON.parse(frame.subarray(headerStart, headerStart + headerLen).toString('utf8')) as
+      DesktopRenderSlidesResult & { parts?: Array<{ bytes: number; name: string }> };
+    const parts = header.parts ?? [];
+    delete (header as { parts?: unknown }).parts;
+    if (!input.outputDir) throw new Error('slide renderer handoff requires outputDir');
+    await fs.promises.mkdir(input.outputDir, { recursive: true });
+    let offset = headerStart + headerLen;
+    const written: string[] = [];
+    for (const part of parts) {
+      // The renderer names the files; only the daemon decides where they land.
+      // basename() keeps a compromised or buggy renderer from walking out of the
+      // directory the daemon owns.
+      const file = path.join(input.outputDir, path.basename(part.name));
+      await fs.promises.writeFile(file, frame.subarray(offset, offset + part.bytes));
+      offset += part.bytes;
+      written.push(file);
+    }
+    // A frame whose parts do not add up to its length was truncated or
+    // mis-declared; the files just written are not trustworthy output.
+    if (offset !== frame.length) throw new Error('slide renderer frame length mismatch');
+    if (written.length === 1 && written[0]!.endsWith('.pptx')) return { ...header, pptxFile: written[0] };
+    return { ...header, slideFiles: written };
+  };
+}
+
 // Loosely typed shape — we only access `namespace`, `base`, `mode`, and
 // `source` from the runtime context when building the diagnostics export.
 // Anything richer would force a dependency from server.ts into the sidecar
@@ -2874,6 +2968,14 @@ export async function startServer({
   odNextComplexProductionResolver = null,
 }: StartServerOptions = {}) {
   host = normalizeDaemonBindHost(host);
+  // An injected renderer always wins: the desktop sidecar passes its own, and
+  // this must not second-guess it. Only when there is none does the optional
+  // OD_SLIDE_RENDERER_URL extension point get a say, and only if it is set.
+  // Reassigned before any route closes over the binding, so the export routes'
+  // 501 guard and the capability the version endpoint advertises are computed
+  // from the same final value — an external renderer cannot end up serving
+  // exports that the daemon advertises as unavailable, or vice versa.
+  desktopSlideRenderer = desktopSlideRenderer ?? httpSlideRendererFromEnv();
   let resolvedPort = port;
   let daemonShuttingDown = false;
   const extraAllowedOrigins = configuredAllowedOrigins();
