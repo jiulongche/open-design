@@ -9,6 +9,7 @@ import type {
   DesktopRenderSlidesInput,
   DesktopRenderSlidesResult,
 } from '@open-design/sidecar-proto';
+import { decodeSlideRenderFrame, SLIDE_RENDERER_HTTP_PATH } from '@open-design/sidecar-proto';
 import express from 'express';
 import multer from 'multer';
 import JSZip from 'jszip';
@@ -2810,7 +2811,13 @@ export function createSseResponse(
 
 export type DesktopPdfExporter = (input: DesktopExportPdfInput) => Promise<DesktopExportPdfResult>;
 export type DesktopFrameRenderer = (input: DesktopRenderFramesInput) => Promise<DesktopRenderFramesResult>;
-export type DesktopSlideRenderer = (input: DesktopRenderSlidesInput) => Promise<DesktopRenderSlidesResult>;
+// `options.signal` lets a caller cancel a render it no longer has a consumer
+// for — an export client that disconnected. Optional so the desktop sidecar's
+// injector, which does not take one, still satisfies the type.
+export type DesktopSlideRenderer = (
+  input: DesktopRenderSlidesInput,
+  options?: { signal?: AbortSignal },
+) => Promise<DesktopRenderSlidesResult>;
 export type DesktopArtifactExporter = (input: DesktopExportArtifactInput) => Promise<DesktopExportArtifactResult>;
 
 // Optional extension point for deployments with no Electron sidecar.
@@ -2828,32 +2835,35 @@ export type DesktopArtifactExporter = (input: DesktopExportArtifactInput) => Pro
 //
 // The two-process shape is not new here — the desktop build already asks
 // another process to render, over unix-socket JSON IPC
-// (packages/sidecar/src/json-ipc.ts). This swaps the transport for HTTP and
-// reuses DesktopRenderSlidesInput/Result verbatim, so an external renderer is
-// held to exactly the contract the Electron one already satisfies.
+// (packages/sidecar/src/json-ipc.ts). This swaps the transport for HTTP.
+//
+// The wire format an external renderer has to implement is specified and
+// versioned in `@open-design/sidecar-proto` (slide-renderer-http.ts), which
+// also owns the frame codec used below — the same one renderers and the tests
+// encode with, so a producer and this decoder cannot drift apart.
 const SLIDE_RENDERER_HTTP_TIMEOUT_MS = 600_000;
-// Rendered bytes come back as one binary frame rather than JSON: a deck export
-// is tens of MB of PNG, which base64 inflates by a third, and the alternative —
-// letting the renderer write into the daemon's data root — would mean mounting
-// that directory into the process that executes untrusted artifact JS. So the
-// bytes travel over HTTP and *the daemon* writes them into the outputDir it
-// chose. Frame layout:
-//   MAGIC(9B) | headerLen(uint32 BE) | header JSON | part0 | part1 | ...
-// where the header is a DesktopRenderSlidesResult plus a `parts` array of
-// `{name, bytes}` describing the payloads that follow, in order.
-const SLIDE_RENDERER_FRAME_MAGIC = 'ODRENDER1';
 
 export function httpSlideRendererFromEnv(
   url = process.env.OD_SLIDE_RENDERER_URL,
 ): DesktopSlideRenderer | null {
   const base = (url || '').trim().replace(/\/+$/, '');
   if (!base) return null;
-  return async (input: DesktopRenderSlidesInput): Promise<DesktopRenderSlidesResult> => {
-    const res = await fetch(`${base}/render-slides`, {
+  return async (
+    input: DesktopRenderSlidesInput,
+    options?: { signal?: AbortSignal },
+  ): Promise<DesktopRenderSlidesResult> => {
+    // Two independent reasons to stop: the render is taking implausibly long,
+    // and nobody is waiting for it any more. The second one matters here in a
+    // way it does not for the co-located renderer — a remote one keeps
+    // executing the artifact and holding tens of MB of response for a consumer
+    // that has already gone.
+    const timeout = AbortSignal.timeout(SLIDE_RENDERER_HTTP_TIMEOUT_MS);
+    const signal = options?.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
+    const res = await fetch(`${base}${SLIDE_RENDERER_HTTP_PATH}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(input),
-      signal: AbortSignal.timeout(SLIDE_RENDERER_HTTP_TIMEOUT_MS),
+      signal,
     });
     // A non-2xx means the RENDERER is broken (down, overloaded, misconfigured) —
     // a different thing from "this HTML cannot be rendered", and it needs a
@@ -2876,34 +2886,22 @@ export function httpSlideRendererFromEnv(
     if ((res.headers.get('content-type') || '').includes('application/json')) {
       return (await res.json()) as DesktopRenderSlidesResult;
     }
-    const frame = Buffer.from(await res.arrayBuffer());
-    if (frame.subarray(0, SLIDE_RENDERER_FRAME_MAGIC.length).toString('ascii') !== SLIDE_RENDERER_FRAME_MAGIC) {
-      throw new Error('slide renderer returned an unrecognised frame');
-    }
-    const headerStart = SLIDE_RENDERER_FRAME_MAGIC.length + 4;
-    const headerLen = frame.readUInt32BE(SLIDE_RENDERER_FRAME_MAGIC.length);
-    const header = JSON.parse(frame.subarray(headerStart, headerStart + headerLen).toString('utf8')) as
-      DesktopRenderSlidesResult & { parts?: Array<{ bytes: number; name: string }> };
-    const parts = header.parts ?? [];
-    delete (header as { parts?: unknown }).parts;
+    // Decoding validates the whole frame before anything is written, so a
+    // truncated response cannot leave half an export on disk.
+    const { parts, result } = decodeSlideRenderFrame(await res.arrayBuffer());
     if (!input.outputDir) throw new Error('slide renderer handoff requires outputDir');
     await fs.promises.mkdir(input.outputDir, { recursive: true });
-    let offset = headerStart + headerLen;
     const written: string[] = [];
     for (const part of parts) {
       // The renderer names the files; only the daemon decides where they land.
       // basename() keeps a compromised or buggy renderer from walking out of the
       // directory the daemon owns.
       const file = path.join(input.outputDir, path.basename(part.name));
-      await fs.promises.writeFile(file, frame.subarray(offset, offset + part.bytes));
-      offset += part.bytes;
+      await fs.promises.writeFile(file, part.body);
       written.push(file);
     }
-    // A frame whose parts do not add up to its length was truncated or
-    // mis-declared; the files just written are not trustworthy output.
-    if (offset !== frame.length) throw new Error('slide renderer frame length mismatch');
-    if (written.length === 1 && written[0]!.endsWith('.pptx')) return { ...header, pptxFile: written[0] };
-    return { ...header, slideFiles: written };
+    if (written.length === 1 && written[0]!.endsWith('.pptx')) return { ...result, pptxFile: written[0] };
+    return { ...result, slideFiles: written };
   };
 }
 

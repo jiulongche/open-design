@@ -3,6 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import {
+  encodeSlideRenderFrame,
+  SLIDE_RENDERER_FRAME_MAGIC,
+  SLIDE_RENDERER_HTTP_PROTOCOL_VERSION,
+} from '@open-design/sidecar-proto';
 import { httpSlideRendererFromEnv, startServer } from '../src/server.js';
 
 // The optional HTTP slide renderer: the extension point that lets a deployment
@@ -10,32 +15,31 @@ import { httpSlideRendererFromEnv, startServer } from '../src/server.js';
 // ones an operator cannot see going wrong — an unset variable that quietly
 // changes something, a renderer outage reported as a render result, or a
 // renderer choosing where the daemon writes files.
+//
+// Frames are built with the published encoder rather than a local copy of the
+// layout: a test that hand-rolls the format can agree with itself while
+// disagreeing with every real renderer, which is exactly the drift the shared
+// codec exists to prevent. The malformed cases below corrupt the encoder's
+// OUTPUT, so they stay honest about what a real renderer could emit.
 
-const MAGIC = 'ODRENDER1';
-
-/** Builds the binary return frame the renderer speaks. */
+/** Builds a success frame the way a renderer would. */
 function frame(
-  header: Record<string, unknown>,
+  result: Record<string, unknown>,
   parts: Array<{ name: string; body: Buffer }>,
-  overrides?: { declaredBytes?: number[] },
 ): Buffer {
-  const headerJson = Buffer.from(
-    JSON.stringify({
-      ...header,
-      parts: parts.map((part, i) => ({
-        name: part.name,
-        bytes: overrides?.declaredBytes?.[i] ?? part.body.length,
-      })),
-    }),
-    'utf8',
-  );
-  const len = Buffer.alloc(4);
-  len.writeUInt32BE(headerJson.length);
-  return Buffer.concat([Buffer.from(MAGIC, 'ascii'), len, headerJson, ...parts.map((p) => p.body)]);
+  return Buffer.from(encodeSlideRenderFrame(result as never, parts));
 }
 
 const servers: http.Server[] = [];
 const tempDirs: string[] = [];
+
+/** Polls until `predicate` holds, so a cross-process signal is not raced. */
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 
 /** A stub renderer. `respond` decides what the single /render-slides call returns. */
 async function stubRenderer(
@@ -200,18 +204,53 @@ describe('httpSlideRendererFromEnv', () => {
     expect(fs.existsSync(escapee)).toBe(false);
   });
 
-  it('rejects a frame whose parts do not account for its length', async () => {
+  it('rejects a frame cut short in transit', async () => {
     const outputDir = tempOutputDir();
+    const full = frame({ ok: true }, [{ name: 'a.png', body: Buffer.from('12345') }]);
     const base = await stubRenderer((res) => {
       res.writeHead(200, { 'content-type': 'application/octet-stream' });
-      // Declares fewer bytes than it sends: a truncated or mis-framed response.
-      res.end(frame({ ok: true }, [{ name: 'a.png', body: Buffer.from('12345') }], {
-        declaredBytes: [2],
-      }));
+      // A well-formed frame missing its last two bytes — what a dropped
+      // connection or a renderer that died mid-write actually produces.
+      res.end(full.subarray(0, full.length - 2));
     });
 
     await expect(httpSlideRendererFromEnv(base)!({ html: '', outputDir })).rejects.toThrow(
       'frame length mismatch',
+    );
+    expect(fs.readdirSync(outputDir)).toEqual([]);
+  });
+
+  it('rejects a frame carrying more than it declares', async () => {
+    const outputDir = tempOutputDir();
+    const base = await stubRenderer((res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(
+        Buffer.concat([
+          frame({ ok: true }, [{ name: 'a.png', body: Buffer.from('12345') }]),
+          Buffer.from('trailing'),
+        ]),
+      );
+    });
+
+    await expect(httpSlideRendererFromEnv(base)!({ html: '', outputDir })).rejects.toThrow(
+      'frame length mismatch',
+    );
+  });
+
+  it('refuses a frame version it does not speak', async () => {
+    const outputDir = tempOutputDir();
+    const future = frame({ ok: true }, [{ name: 'a.png', body: Buffer.from('x') }]);
+    // Bump the version digit in the magic; everything else stays valid. An
+    // operator running a newer renderer needs to be told that, not handed
+    // "unrecognised frame".
+    future[SLIDE_RENDERER_FRAME_MAGIC.length - 1] = '9'.charCodeAt(0);
+    const base = await stubRenderer((res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(future);
+    });
+
+    await expect(httpSlideRendererFromEnv(base)!({ html: '', outputDir })).rejects.toThrow(
+      `frame version 9 is not supported (this build speaks ${SLIDE_RENDERER_HTTP_PROTOCOL_VERSION})`,
     );
   });
 
@@ -234,6 +273,41 @@ describe('httpSlideRendererFromEnv', () => {
     });
 
     await expect(httpSlideRendererFromEnv(base)!({ html: '' })).rejects.toThrow('requires outputDir');
+  });
+
+  it('stops the renderer when the caller cancels', async () => {
+    // A renderer that never answers, so the only way this resolves is the
+    // cancellation actually reaching the request.
+    let rendererSawRequest = false;
+    let rendererSawAbort = false;
+    const server = http.createServer((req) => {
+      rendererSawRequest = true;
+      req.resume();
+      // 'aborted' is deprecated on IncomingMessage and no longer fires reliably;
+      // this handler never responds, so any close is the caller going away.
+      req.once('close', () => {
+        rendererSawAbort = true;
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as { port: number };
+
+    const caller = new AbortController();
+    const pending = httpSlideRendererFromEnv(`http://127.0.0.1:${port}`)!(
+      { html: '', outputDir: tempOutputDir() },
+      { signal: caller.signal },
+    );
+    // Abort only once the renderer is actually handling the request. Cancelling
+    // sooner would abort a request that never left, which proves nothing about
+    // propagation and is what made an earlier version of this pass vacuously.
+    await waitFor(() => rendererSawRequest);
+    expect(rendererSawRequest).toBe(true);
+    caller.abort();
+
+    await expect(pending).rejects.toThrow();
+    await waitFor(() => rendererSawAbort);
+    expect(rendererSawAbort).toBe(true);
   });
 });
 
@@ -272,11 +346,12 @@ describe('OD_SLIDE_RENDERER_URL wiring', () => {
     }
   }
 
-  const exportEditablePptx = (baseUrl: string) =>
+  const exportEditablePptx = (baseUrl: string, signal?: AbortSignal) =>
     fetch(`${baseUrl}/api/projects/${projectId}/export/pptx`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fileName: 'deck.html', editable: true }),
+      ...(signal ? { signal } : {}),
     });
 
   const capability = async (baseUrl: string) => {
@@ -334,6 +409,40 @@ describe('OD_SLIDE_RENDERER_URL wiring', () => {
 
       expect(res.status).toBe(200);
       expect(Buffer.from(await res.arrayBuffer())).toEqual(injectedBytes);
+    });
+  });
+
+  // The reason cancellation matters more for an external renderer than for the
+  // co-located one: it does not share the daemon's lifetime, so without this it
+  // keeps executing the artifact and holding the response for a client that has
+  // already hung up.
+  it('cancels the render when the export client disconnects', async () => {
+    let rendererSawAbort = false;
+    const renderer = http.createServer((req) => {
+      req.resume();
+      // Never answer. The request can only end by being aborted.
+      // 'aborted' is deprecated on IncomingMessage and no longer fires reliably;
+      // this handler never responds, so any close is the caller going away.
+      req.once('close', () => {
+        rendererSawAbort = true;
+      });
+    });
+    servers.push(renderer);
+    await new Promise<void>((resolve) => renderer.listen(0, '127.0.0.1', resolve));
+    const { port } = renderer.address() as { port: number };
+
+    await withDaemon(`http://127.0.0.1:${port}`, {}, async (baseUrl) => {
+      const client = new AbortController();
+      const pending = exportEditablePptx(baseUrl, client.signal).catch(() => undefined);
+      // Wait until the daemon has actually reached the renderer, otherwise
+      // aborting could beat the request out and the test would pass without
+      // exercising the propagation at all.
+      await waitFor(() => renderer.connections > 0 || rendererSawAbort);
+      client.abort();
+      await pending;
+
+      await waitFor(() => rendererSawAbort);
+      expect(rendererSawAbort).toBe(true);
     });
   });
 });
