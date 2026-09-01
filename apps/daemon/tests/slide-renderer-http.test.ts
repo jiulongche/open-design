@@ -8,7 +8,8 @@ import {
   SLIDE_RENDERER_FRAME_MAGIC,
   SLIDE_RENDERER_HTTP_PROTOCOL_VERSION,
 } from '@open-design/sidecar-proto';
-import { httpSlideRendererFromEnv, startServer } from '../src/server.js';
+import { httpSlideRendererFromEnv } from '../src/integrations/slide-renderer-http.js';
+import { startServer } from '../src/server.js';
 
 // The optional HTTP slide renderer: the extension point that lets a deployment
 // without an Electron sidecar supply one. The properties worth pinning are the
@@ -214,7 +215,7 @@ describe('httpSlideRendererFromEnv', () => {
     const result = await httpSlideRendererFromEnv(base)!({ html: '', outputDir });
 
     expect(new Set(result.slideFiles)).toHaveLength(2);
-    expect(result.slideFiles!.map((file) => fs.readFileSync(file).toString())).toEqual([
+    expect(result.slideFiles!.map((file: string) => fs.readFileSync(file).toString())).toEqual([
       'first',
       'second',
     ]);

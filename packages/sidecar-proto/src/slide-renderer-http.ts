@@ -110,6 +110,19 @@ export type SlideRenderFrameHeader = DesktopRenderSlidesResult & {
   parts?: SlideRenderFramePart[];
 };
 
+/**
+ * Result fields a success frame may carry, and what they must be. Checked at
+ * runtime because a renderer is a separate program that can send anything;
+ * fields absent here (`error`, `errorCode`) belong to a failed render, which
+ * travels as JSON rather than as a frame.
+ */
+const SLIDE_RENDER_RESULT_FIELD_TYPES: ReadonlyArray<[string, "number" | "string"]> = [
+  ["height", "number"],
+  ["mode", "string"],
+  ["pptxFile", "string"],
+  ["width", "number"],
+];
+
 /** A decoded success frame. */
 export type DecodedSlideRenderFrame = {
   /** The result as declared, with the transport-only `parts` removed. */
@@ -200,14 +213,39 @@ export function decodeSlideRenderFrame(frame: ArrayBuffer | Uint8Array): Decoded
     throw new SlideRenderFrameError("slide renderer frame header is truncated");
   }
 
-  let header: SlideRenderFrameHeader;
+  // Parsed as `unknown` and checked, not cast. This is an external wire
+  // boundary, so the TypeScript annotation buys the daemon nothing at runtime:
+  // a header of `null`, or one whose `parts` is an object, would otherwise
+  // escape as a raw TypeError from somewhere further down, and a truthy
+  // non-boolean `ok` would flow back as a successful result.
+  let raw: unknown;
   try {
-    header = JSON.parse(new TextDecoder().decode(bytes.subarray(headerStart, headerEnd)));
+    raw = JSON.parse(new TextDecoder().decode(bytes.subarray(headerStart, headerEnd)));
   } catch {
     throw new SlideRenderFrameError("slide renderer frame header is not valid JSON");
   }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new SlideRenderFrameError("slide renderer frame header is not an object");
+  }
+  const header = raw as Record<string, unknown>;
+  // A success frame carries a successful result by definition; a failed render
+  // is the JSON response, not this.
+  if (header.ok !== true) {
+    throw new SlideRenderFrameError("slide renderer success frame must declare ok: true");
+  }
+  if (header.parts !== undefined && !Array.isArray(header.parts)) {
+    throw new SlideRenderFrameError("slide renderer frame parts must be an array");
+  }
+  for (const [field, expected] of SLIDE_RENDER_RESULT_FIELD_TYPES) {
+    const value = header[field];
+    if (value !== undefined && typeof value !== expected) {
+      throw new SlideRenderFrameError(
+        `slide renderer frame field \`${field}\` must be a ${expected}`,
+      );
+    }
+  }
 
-  const declared = header.parts ?? [];
+  const declared = (header.parts ?? []) as SlideRenderFramePart[];
   const parts: Array<{ body: Uint8Array; name: string }> = [];
   let offset = headerEnd;
   for (const part of declared) {
@@ -226,7 +264,7 @@ export function decodeSlideRenderFrame(frame: ArrayBuffer | Uint8Array): Decoded
     throw new SlideRenderFrameError("slide renderer frame length mismatch");
   }
 
-  const result = { ...header };
+  const result = { ...header } as DesktopRenderSlidesResult;
   delete (result as { parts?: unknown }).parts;
   return { parts, result };
 }

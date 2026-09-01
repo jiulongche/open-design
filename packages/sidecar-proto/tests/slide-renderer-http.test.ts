@@ -121,21 +121,68 @@ describe("slide render frame codec", () => {
     expect(() => decodeSlideRenderFrame(frame)).toThrow("not valid JSON");
   });
 
-  it("refuses a part declaration that is not a length and a name", () => {
-    const header = new TextEncoder().encode(
-      JSON.stringify({ ok: true, parts: [{ bytes: "lots", name: "a.png" }] }),
-    );
-    const frame = new Uint8Array(SLIDE_RENDERER_FRAME_MAGIC.length + 4 + header.byteLength);
+  /** Builds a frame carrying `header` verbatim, with no payloads after it. */
+  const frameWithHeader = (header: unknown): Uint8Array => {
+    const encoded = new TextEncoder().encode(JSON.stringify(header));
+    const frame = new Uint8Array(SLIDE_RENDERER_FRAME_MAGIC.length + 4 + encoded.byteLength);
     for (let i = 0; i < SLIDE_RENDERER_FRAME_MAGIC.length; i++) {
       frame[i] = SLIDE_RENDERER_FRAME_MAGIC.charCodeAt(i);
     }
     new DataView(frame.buffer).setUint32(
       SLIDE_RENDERER_FRAME_MAGIC.length,
-      header.byteLength,
+      encoded.byteLength,
       false,
     );
-    frame.set(header, SLIDE_RENDERER_FRAME_MAGIC.length + 4);
+    frame.set(encoded, SLIDE_RENDERER_FRAME_MAGIC.length + 4);
+    return frame;
+  };
 
-    expect(() => decodeSlideRenderFrame(frame)).toThrow("malformed part");
+  it("refuses a part declaration that is not a length and a name", () => {
+    expect(() =>
+      decodeSlideRenderFrame(frameWithHeader({ ok: true, parts: [{ bytes: "lots", name: "a.png" }] })),
+    ).toThrow("malformed part");
+  });
+
+  // A renderer is a separate program that can send anything, and the header's
+  // TypeScript type is erased at runtime. Without these checks a `null` header
+  // or an object-valued `parts` escapes as a raw TypeError from somewhere
+  // further down, and a truthy non-boolean `ok` flows back as a success.
+  it.each([
+    ["null", null],
+    ["a number", 7],
+    ["a string", "ok"],
+    ["an array", [{ ok: true }]],
+  ])("refuses a header that is %s", (_label, header) => {
+    expect(() => decodeSlideRenderFrame(frameWithHeader(header))).toThrow("not an object");
+  });
+
+  it.each([
+    ["absent", {}],
+    ["false", { ok: false }],
+    ["a truthy string", { ok: "yes" }],
+    ["a truthy number", { ok: 1 }],
+  ])("refuses a success frame whose ok is %s", (_label, header) => {
+    expect(() => decodeSlideRenderFrame(frameWithHeader(header))).toThrow("must declare ok: true");
+  });
+
+  it.each([
+    ["an object", { ok: true, parts: {} }],
+    ["a string", { ok: true, parts: "two" }],
+    ["a number", { ok: true, parts: 2 }],
+  ])("refuses a frame whose parts is %s", (_label, header) => {
+    expect(() => decodeSlideRenderFrame(frameWithHeader(header))).toThrow("parts must be an array");
+  });
+
+  it.each([
+    ["width", { ok: true, width: "1920" }],
+    ["height", { ok: true, height: null }],
+    ["mode", { ok: true, mode: 3 }],
+    ["pptxFile", { ok: true, pptxFile: true }],
+  ])("refuses a frame whose %s has the wrong type", (field, header) => {
+    expect(() => decodeSlideRenderFrame(frameWithHeader(header))).toThrow(`\`${field}\` must be a`);
+  });
+
+  it("accepts a header carrying only what it needs", () => {
+    expect(decodeSlideRenderFrame(frameWithHeader({ ok: true })).result).toEqual({ ok: true });
   });
 });
