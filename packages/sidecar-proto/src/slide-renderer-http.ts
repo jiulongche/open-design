@@ -16,6 +16,15 @@
 // daemon does the writing. It is present because the same input type is used
 // for the co-located Electron renderer, which does write to it directly.
 //
+// `baseHref` is where relative assets (images, fonts, stylesheets) resolve
+// from, and the renderer is expected to fetch them. The daemon builds it from
+// its own address, which for a container binding 0.0.0.0 is a loopback URL that
+// means nothing in a different container — so a split deployment must set
+// `OD_SLIDE_RENDERER_DAEMON_URL` to the origin the renderer uses to reach the
+// daemon, and the daemon rewrites the origin before sending. Getting this wrong
+// does not error: the deck renders with its inline content and silently loses
+// every external asset.
+//
 // ── Response: render failed ────────────────────────────────────────────────
 // HTTP 200, content-type: application/json
 //   body: DesktopRenderSlidesResult with `ok: false`
@@ -55,8 +64,17 @@
 // filesystem with the daemon. Across a network it cannot, and base64 in JSON
 // would inflate a tens-of-megabytes deck export by a third.
 //
-// `name` is advisory. The daemon chooses the directory and takes only the
-// basename, so a renderer cannot decide where anything lands.
+// `name` is advisory, and the daemon means it: output files are named from the
+// REQUEST and the payload's position in the frame, never from what the renderer
+// called them. A renderer therefore cannot decide where a file lands, what it
+// is taken to be, or collide two payloads onto one path. The only thing read
+// from `name` is a file extension, and only when it is one of png/jpg/jpeg —
+// otherwise the encoding the request asked for wins.
+//
+// Which result shape comes back is likewise decided by the request:
+// `editable: true` means exactly one payload and yields `pptxFile`; anything
+// else yields `slideFiles` in frame order. A frame whose payload count
+// contradicts the request is rejected rather than reinterpreted.
 
 import type { DesktopRenderSlidesResult } from "./index.js";
 

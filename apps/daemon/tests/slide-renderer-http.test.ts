@@ -33,6 +33,15 @@ function frame(
 const servers: http.Server[] = [];
 const tempDirs: string[] = [];
 
+/** Reserves a port so the daemon's own URL can be known before it starts. */
+async function freePort(): Promise<number> {
+  const probe = http.createServer();
+  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+  const { port } = probe.address() as { port: number };
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  return port;
+}
+
 /** Polls until `predicate` holds, so a cross-process signal is not raced. */
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -165,6 +174,156 @@ describe('httpSlideRendererFromEnv', () => {
     expect(result).not.toHaveProperty('parts');
   });
 
+  // The protocol calls `name` advisory, so nothing about the outcome may depend
+  // on it. These are the shapes a conforming renderer is allowed to send and
+  // that the previous `.pptx`-suffix check silently mishandled: it wrote the
+  // file, reported it as `slideFiles`, and the editable route then rejected the
+  // export as having produced no PPTX.
+  it.each([['extensionless', 'deck'], ['upper-case', 'DECK.PPTX'], ['unrelated', 'output.bin']])(
+    'returns an editable render as pptxFile whatever the renderer called it (%s)',
+    async (_label, advisoryName) => {
+      const outputDir = tempOutputDir();
+      const body = Buffer.from('PKpptx-bytes');
+      const base = await stubRenderer((res) => {
+        res.writeHead(200, { 'content-type': 'application/octet-stream' });
+        res.end(frame({ ok: true, mode: 'deck' }, [{ name: advisoryName, body }]));
+      });
+
+      const result = await httpSlideRendererFromEnv(base)!({ html: '', editable: true, outputDir });
+
+      expect(result.pptxFile).toBe(path.join(outputDir, 'deck.pptx'));
+      expect(fs.readFileSync(result.pptxFile!)).toEqual(body);
+    },
+  );
+
+  // Two payloads whose advisory names share a basename. Naming the outputs after
+  // them made the second overwrite the first and returned the same path twice —
+  // a deck exported with a slide missing, and nothing anywhere said so.
+  it('keeps payloads separate when their advisory names collide', async () => {
+    const outputDir = tempOutputDir();
+    const base = await stubRenderer((res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(
+        frame({ ok: true, mode: 'deck' }, [
+          { name: 'a/slide.png', body: Buffer.from('first') },
+          { name: 'b/slide.png', body: Buffer.from('second') },
+        ]),
+      );
+    });
+
+    const result = await httpSlideRendererFromEnv(base)!({ html: '', outputDir });
+
+    expect(new Set(result.slideFiles)).toHaveLength(2);
+    expect(result.slideFiles!.map((file) => fs.readFileSync(file).toString())).toEqual([
+      'first',
+      'second',
+    ]);
+  });
+
+  it('takes the image encoding from the request, not from an odd advisory name', async () => {
+    const outputDir = tempOutputDir();
+    const base = await stubRenderer((res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(frame({ ok: true, mode: 'page' }, [{ name: 'weird.bin', body: Buffer.from('x') }]));
+    });
+
+    const result = await httpSlideRendererFromEnv(base)!({
+      html: '',
+      outputDir,
+      pageImageFormat: 'jpeg',
+    });
+
+    expect(result.slideFiles).toEqual([path.join(outputDir, 'slide-0.jpeg')]);
+  });
+
+  it.each([
+    ['an editable render returning several payloads', { editable: true }, 2, 'expected exactly 1'],
+    ['a slide render returning none', {}, 0, 'no payloads'],
+  ])('rejects %s', async (_label, extra, count, message) => {
+    const outputDir = tempOutputDir();
+    const base = await stubRenderer((res) => {
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(
+        frame(
+          { ok: true },
+          Array.from({ length: count }, (_v, i) => ({
+            name: `p${i}.png`,
+            body: Buffer.from('x'),
+          })),
+        ),
+      );
+    });
+
+    await expect(
+      httpSlideRendererFromEnv(base)!({ html: '', outputDir, ...extra }),
+    ).rejects.toThrow(message as string);
+  });
+
+  // The silent one: a renderer in another container is told to load relative
+  // assets from the daemon's own address, which there is loopback pointing back
+  // at the renderer. Nothing errors — the deck just renders without its images.
+  it('rewrites the asset origin to one the renderer can reach', async () => {
+    const seen: Array<string | undefined> = [];
+    const base = await stubRenderer((res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'stop here', errorCode: 'RENDER_FAILED' }));
+    });
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        seen.push(JSON.parse(Buffer.concat(chunks).toString('utf8')).baseHref);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'stop here' }));
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as { port: number };
+    void base;
+
+    const render = httpSlideRendererFromEnv(
+      `http://127.0.0.1:${port}`,
+      'http://open-design:7456',
+    );
+    await render!({
+      html: '',
+      baseHref: 'http://127.0.0.1:7456/api/projects/p1/preview/scope-abc/sub/',
+    });
+
+    // Origin swapped, scoped path preserved exactly — the scope is what
+    // authorizes the fetch, so losing it would turn a silent failure into a 403.
+    expect(seen[0]).toBe('http://open-design:7456/api/projects/p1/preview/scope-abc/sub/');
+  });
+
+  it('leaves the asset origin alone when no renderer-reachable daemon URL is set', async () => {
+    const seen: Array<string | undefined> = [];
+    const server = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        seen.push(JSON.parse(Buffer.concat(chunks).toString('utf8')).baseHref);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'stop here' }));
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as { port: number };
+
+    const original = 'http://127.0.0.1:7456/api/projects/p1/preview/scope-abc/';
+    await httpSlideRendererFromEnv(`http://127.0.0.1:${port}`, undefined)!({
+      html: '',
+      baseHref: original,
+    });
+    await httpSlideRendererFromEnv(`http://127.0.0.1:${port}`, 'not a url')!({
+      html: '',
+      baseHref: original,
+    });
+
+    expect(seen).toEqual([original, original]);
+  });
+
   it('writes rendered slides in order and reports them as slideFiles', async () => {
     const outputDir = tempOutputDir();
     const parts = [
@@ -178,17 +337,18 @@ describe('httpSlideRendererFromEnv', () => {
 
     const result = await httpSlideRendererFromEnv(base)!({ html: '', outputDir });
 
+    // Named by position in the frame, not by what the renderer called them.
     expect(result.slideFiles).toEqual([
+      path.join(outputDir, 'slide-0.png'),
       path.join(outputDir, 'slide-1.png'),
-      path.join(outputDir, 'slide-2.png'),
     ]);
-    expect(fs.readFileSync(path.join(outputDir, 'slide-2.png')).toString()).toBe('second-longer');
+    expect(fs.readFileSync(path.join(outputDir, 'slide-1.png')).toString()).toBe('second-longer');
   });
 
   // The renderer is a separate process — possibly a separate container — and it
   // names the files. It must not be able to name one that lands outside the
   // directory the daemon owns.
-  it('confines renderer-named files to the output directory', async () => {
+  it('gives a renderer no say in where its output lands', async () => {
     const outputDir = tempOutputDir();
     const escapee = path.join(path.dirname(outputDir), 'escaped.png');
     const base = await stubRenderer((res) => {
@@ -200,8 +360,11 @@ describe('httpSlideRendererFromEnv', () => {
 
     const result = await httpSlideRendererFromEnv(base)!({ html: '', outputDir });
 
-    expect(result.slideFiles).toEqual([path.join(outputDir, 'escaped.png')]);
+    // The traversal attempt is not sanitised into a filename — the name is not
+    // consulted at all, so there is nothing to sanitise.
+    expect(result.slideFiles).toEqual([path.join(outputDir, 'slide-0.png')]);
     expect(fs.existsSync(escapee)).toBe(false);
+    expect(fs.readdirSync(outputDir)).toEqual(['slide-0.png']);
   });
 
   it('rejects a frame cut short in transit', async () => {
@@ -330,6 +493,14 @@ describe('OD_SLIDE_RENDERER_URL wiring', () => {
       url: string;
       server: http.Server;
     };
+    // Registered through the API, not just written to disk: the export route
+    // tolerates an unknown project, but the preview route that serves the
+    // renderer's relative assets does not.
+    await fetch(`${started.url}/api/projects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: projectId, name: projectId }),
+    });
     // Written per-daemon because the data dir is shared across this file's tests.
     const dir = path.join(process.env.OD_DATA_DIR!, 'projects', projectId);
     fs.mkdirSync(dir, { recursive: true });
@@ -410,6 +581,49 @@ describe('OD_SLIDE_RENDERER_URL wiring', () => {
       expect(res.status).toBe(200);
       expect(Buffer.from(await res.arrayBuffer())).toEqual(injectedBytes);
     });
+  });
+
+  // End to end for the asset path, because the unit-level origin rewrite proves
+  // the URL is different, not that it WORKS. The renderer here does what a real
+  // one does: takes the `baseHref` it was handed and fetches a relative asset
+  // through it, as a browser would — the minted scope has to authorize it and
+  // the path has to survive intact.
+  //
+  // Deliberately NOT reached via `localhost`: the daemon reserves the swapped
+  // spelling of its own host (127.0.0.1 <-> localhost) for powered previews and
+  // answers 403 on every other /api route for browser-shaped requests. That is
+  // a real trap for this setting, documented in deploy/.env.example, but it is
+  // a property of that one hostname rather than of cross-origin asset loading.
+  it('lets the renderer load a relative asset through the rewritten origin', async () => {
+    const port = await freePort();
+    let fetched: { body: string; status: number } | null = null;
+    const renderer = http.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const { baseHref } = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        void (async () => {
+          const asset = await fetch(new URL('theme.css', baseHref));
+          fetched = { body: await asset.text(), status: asset.status };
+          // Stop the export here; the asset fetch is what this pins.
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'asset probe complete' }));
+        })();
+      });
+    });
+    servers.push(renderer);
+    await new Promise<void>((resolve) => renderer.listen(0, '127.0.0.1', resolve));
+    const rendererPort = (renderer.address() as { port: number }).port;
+
+    await withDaemon(`http://127.0.0.1:${rendererPort}`, { port }, async (baseUrl) => {
+      fs.writeFileSync(
+        path.join(process.env.OD_DATA_DIR!, 'projects', projectId, 'theme.css'),
+        'body{color:red}',
+      );
+      await exportEditablePptx(baseUrl);
+    });
+
+    expect(fetched).toEqual({ body: 'body{color:red}', status: 200 });
   });
 
   // The reason cancellation matters more for an external renderer than for the

@@ -9121,7 +9121,15 @@ function HtmlViewer({
   useEffect(() => {
     const exportSurfaceVisible =
       (deployMenuOpen && unifiedActionTab === 'export') || pptxExportModalOpen || imageExportModalOpen;
-    if (!exportSurfaceVisible) return;
+    if (!exportSurfaceVisible) {
+      // Closing the last surface discards the answer, or clause 1 above would
+      // be false: capture paths that belong to no surface (screenshot-to-chat,
+      // Mark/Draw) read this state too, so a resolved `false` left behind would
+      // keep suppressing the daemon render after the daemon it described is
+      // gone. Unknown fails open, which is the safe direction.
+      setSlideRendererAvailable(null);
+      return;
+    }
     let cancelled = false;
     setSlideRendererAvailable(null);
     void (async () => {

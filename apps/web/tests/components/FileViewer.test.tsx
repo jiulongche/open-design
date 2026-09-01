@@ -7628,6 +7628,14 @@ describe('FileViewer SVG artifacts', () => {
       const url = String(typeof input === 'object' && 'url' in input ? input.url : input);
       if (url.includes('/api/version')) return versionResponse(capabilities);
       if (url.endsWith('/export/pdf-image')) return new Response('PDF', { status: 200 });
+      // A renderer-less daemon's answer, so a capture that reaches the daemon
+      // falls back the way it would in production instead of throwing.
+      if (url.endsWith('/export/image')) {
+        return new Response(JSON.stringify({ error: { code: 'UPSTREAM_UNAVAILABLE' } }), {
+          status: 501,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       if (url.endsWith('/export/pdf')) return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { 'content-type': 'application/json' },

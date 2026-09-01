@@ -2843,8 +2843,66 @@ export type DesktopArtifactExporter = (input: DesktopExportArtifactInput) => Pro
 // encode with, so a producer and this decoder cannot drift apart.
 const SLIDE_RENDERER_HTTP_TIMEOUT_MS = 600_000;
 
+/**
+ * Rewrites the origin of a daemon-built preview URL to one the renderer can
+ * actually reach, keeping the scoped path untouched.
+ *
+ * The export route derives `baseHref` from the daemon's own recorded URL, which
+ * for a container binding `0.0.0.0` is deliberately `http://127.0.0.1:<port>`.
+ * That is correct for everything co-located, and useless to a renderer in a
+ * different container: there, loopback is the renderer itself, so relative
+ * images, fonts and stylesheets silently fail to load while an inline-only deck
+ * still renders perfectly — the failure mode is a subtly wrong export, not an
+ * error. Deployments that split the two need to say where the daemon is
+ * reachable from the renderer's side.
+ *
+ * Deliberately its own setting rather than `OD_PUBLIC_BASE_URL`: that one is the
+ * externally routable address browsers use, which may be a proxied public
+ * hostname. What is needed here is the address one container uses to reach
+ * another, which is usually an internal name and is not the same fact.
+ *
+ * Unset, or an unparseable value, leaves the URL exactly as built.
+ */
+function renderReachableBaseHref(baseHref: string | undefined, origin: string | undefined): string | undefined {
+  const configured = (origin || '').trim();
+  if (!baseHref || !configured) return baseHref;
+  try {
+    const target = new URL(configured);
+    const url = new URL(baseHref);
+    url.protocol = target.protocol;
+    url.host = target.host;
+    return url.toString();
+  } catch {
+    return baseHref;
+  }
+}
+
+// Image encodings the daemon is willing to take as a hint from a renderer-
+// supplied name. Anything else falls back to what the request asked for, so an
+// odd or absent extension cannot decide the file type.
+const SLIDE_RENDERER_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg']);
+
+/**
+ * The name the daemon gives a rendered payload. Positional and derived from the
+ * request, so it is unique by construction and carries no meaning the renderer
+ * could have got wrong. The advisory name contributes at most a validated image
+ * extension.
+ */
+function slideRendererOutputName(
+  input: DesktopRenderSlidesInput,
+  advisoryName: string,
+  index: number,
+): string {
+  if (input.editable) return 'deck.pptx';
+  const advisory = path.extname(path.basename(advisoryName)).replace(/^\./, '').toLowerCase();
+  const requested = input.pageImageFormat === 'jpeg' ? 'jpeg' : 'png';
+  const ext = SLIDE_RENDERER_IMAGE_EXTENSIONS.has(advisory) ? advisory : requested;
+  return `slide-${index}.${ext}`;
+}
+
 export function httpSlideRendererFromEnv(
   url = process.env.OD_SLIDE_RENDERER_URL,
+  daemonOrigin = process.env.OD_SLIDE_RENDERER_DAEMON_URL,
 ): DesktopSlideRenderer | null {
   const base = (url || '').trim().replace(/\/+$/, '');
   if (!base) return null;
@@ -2852,6 +2910,9 @@ export function httpSlideRendererFromEnv(
     input: DesktopRenderSlidesInput,
     options?: { signal?: AbortSignal },
   ): Promise<DesktopRenderSlidesResult> => {
+    const reachableBaseHref = renderReachableBaseHref(input.baseHref, daemonOrigin);
+    const request: DesktopRenderSlidesInput =
+      reachableBaseHref === input.baseHref ? input : { ...input, baseHref: reachableBaseHref };
     // Two independent reasons to stop: the render is taking implausibly long,
     // and nobody is waiting for it any more. The second one matters here in a
     // way it does not for the co-located renderer — a remote one keeps
@@ -2862,7 +2923,7 @@ export function httpSlideRendererFromEnv(
     const res = await fetch(`${base}${SLIDE_RENDERER_HTTP_PATH}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(input),
+      body: JSON.stringify(request),
       signal,
     });
     // A non-2xx means the RENDERER is broken (down, overloaded, misconfigured) —
@@ -2890,17 +2951,30 @@ export function httpSlideRendererFromEnv(
     // truncated response cannot leave half an export on disk.
     const { parts, result } = decodeSlideRenderFrame(await res.arrayBuffer());
     if (!input.outputDir) throw new Error('slide renderer handoff requires outputDir');
+    // What came back is decided by what was ASKED for, never by what the renderer
+    // called the files. `part.name` is advertised as advisory, so treating it as
+    // meaningful would contradict the published protocol — and would make a
+    // conforming renderer that returns `deck` or `deck.PPTX` produce a
+    // successfully written export the route then rejects as having no PPTX.
+    if (input.editable && parts.length !== 1) {
+      throw new Error(`editable render returned ${parts.length} payloads, expected exactly 1`);
+    }
+    if (!input.editable && parts.length === 0) {
+      throw new Error('slide render returned no payloads');
+    }
     await fs.promises.mkdir(input.outputDir, { recursive: true });
     const written: string[] = [];
-    for (const part of parts) {
-      // The renderer names the files; only the daemon decides where they land.
-      // basename() keeps a compromised or buggy renderer from walking out of the
-      // directory the daemon owns.
-      const file = path.join(input.outputDir, path.basename(part.name));
+    for (const [index, part] of parts.entries()) {
+      // The daemon names the files, from the request and the position in the
+      // frame. Deriving them from `part.name` let two parts named `a/slide.png`
+      // and `b/slide.png` collapse onto one basename, silently overwrite each
+      // other and return the same path twice — a multi-slide export quietly
+      // losing slides. Positional names cannot collide.
+      const file = path.join(input.outputDir, slideRendererOutputName(input, part.name, index));
       await fs.promises.writeFile(file, part.body);
       written.push(file);
     }
-    if (written.length === 1 && written[0]!.endsWith('.pptx')) return { ...result, pptxFile: written[0] };
+    if (input.editable) return { ...result, pptxFile: written[0]! };
     return { ...result, slideFiles: written };
   };
 }
