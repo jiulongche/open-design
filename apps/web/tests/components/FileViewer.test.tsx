@@ -7697,6 +7697,56 @@ describe('FileViewer SVG artifacts', () => {
     }
   });
 
+  it('forgets the capability once its last surface closes', async () => {
+    // Clause 1 of the contract above: an answer never outlives the surface
+    // opening that fetched it. That held for free while only surfaces read the
+    // value; `captureExportImageSnapshot` now reads it too, from capture paths
+    // that belong to no surface, so a resolved `false` left behind would go on
+    // suppressing the daemon render against a daemon that may since have one.
+    //
+    // The fixture needs `data-title` alongside `class="slide"`. The viewer's
+    // deck signal accepts a bare `.slide`, but the EXPORT signal
+    // (`sourceLooksLikeExportableDeck`) requires structure — and it is the
+    // export signal that `planDeckImageCapture` reads. Without it the capture
+    // is planned as a page, stays viewport-based, and never reaches the daemon
+    // no matter what the capability says, which makes the whole spec vacuous.
+    const deckHtml =
+      '<html><body>' +
+      '<section class="slide" data-title="One">One</section>' +
+      '<section class="slide" data-title="Two">Two</section>' +
+      '</body></html>';
+    const fetchMock = stubExportFetch({ slideRenderer: false });
+    render(
+      <FileViewer
+        projectId="project-1"
+        projectKind="prototype"
+        file={deckFile()}
+        liveHtml={deckHtml}
+        slideNavRequest={{ nonce: 7620, slideIndex: 1 }}
+      />,
+    );
+
+    // Phase 1 — establish that `false` actually resolved and took effect. The
+    // PDF entry is the observable: a resolved `false` skips the screenshot
+    // route entirely, so seeing the vector POST without it proves the state.
+    await openUnifiedExportTab();
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Export as PDF/i }));
+    await waitFor(() => {
+      expect(calledPaths(fetchMock)).toContain('/api/projects/project-1/export/pdf');
+    });
+    expect(calledPaths(fetchMock)).not.toContain('/api/projects/project-1/export/pdf-image');
+
+    // Phase 2 — the surface is gone, so a capture that belongs to none of them
+    // must be back to unknown and ask the daemon again.
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+    fetchMock.mockClear();
+    fireEvent.click(screen.getByTestId('edit-screenshot-to-chat-button'));
+
+    await waitFor(() => {
+      expect(calledPaths(fetchMock)).toContain('/api/projects/project-1/export/image');
+    });
+  });
+
   it('opens a PPTX mode dialog in a browser and defaults to editable export', async () => {
     const originalCreateObjectUrl = URL.createObjectURL;
     const originalRevokeObjectUrl = URL.revokeObjectURL;
